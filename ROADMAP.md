@@ -40,3 +40,21 @@ Target resume line:
 - [ ] Live leaderboard demo (small web page fed by SkipDB)
 - [ ] Docker image, `docker run -p 6380:6380 skipdb`
 - [ ] Architecture diagram and a write-up of the design trade-offs
+
+---
+
+## Scheduled backlog (worked top to bottom, 1–2 commits per session)
+
+Each item must ship with tests, keep `OK` from the full suite, and update the
+README if user-visible. Tick the box in the same commit that finishes it.
+
+- [ ] 1. AOF persistence: append every write command to `appendonly.aof`, replay it on startup (`--aof <path>` flag)
+- [ ] 2. AOF fsync policy (`always` / `everysec` / `no`) + `BGREWRITEAOF` compaction that rewrites the minimal command set
+- [ ] 3. Key expiry: `EXPIRE`, `PEXPIRE`, `TTL`, `PTTL`, `PERSIST`, `SET ... EX/PX`; lazy expiry on access + periodic sampling sweep; injectable clock for tests
+- [ ] 4. `ZADD` flags: `NX`, `XX`, `GT`, `LT`, `CH`, `INCR` with Redis's exact compatibility rules and errors
+- [ ] 5. More sorted-set commands: `ZPOPMIN`, `ZPOPMAX`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZMSCORE`, `ZRANDMEMBER`
+- [ ] 6. RESP3 support (`HELLO 3`): maps, doubles, nulls, per-connection protocol so redis-py 8 works without `protocol=2`
+- [ ] 7. Benchmark harness (`skipdb.bench`): RankedSkipList vs `TreeMap` vs `ConcurrentSkipListMap` for insert/rank/range at 10k–1M elements, warmup + repeated trials, CSV output, results table in README
+- [ ] 8. Single-threaded NIO event-loop server (`--io nio`), Redis's model; compare against thread-per-client with `redis-benchmark` and document throughput/p99
+- [ ] 9. Live leaderboard demo: tiny HTTP server (`com.sun.net.httpserver`) + one HTML page that polls SkipDB and animates rank changes; `--demo` flag
+- [ ] 10. Dockerfile, architecture diagram (Mermaid) in README, final results section and resume-ready summary
