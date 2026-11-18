@@ -18,9 +18,12 @@ Target resume line:
       ZADD ZINCRBY ZSCORE ZCARD ZREM ZRANK ZREVRANK ZRANGE ZREVRANGE
       ZRANGEBYSCORE ZCOUNT
 - [x] Multi-client TCP server (`redis-cli -p 6380` works)
+- [x] Client handshake (HELLO, CLIENT, SELECT, INFO) and MULTI/EXEC/DISCARD,
+      verified with redis-cli, redis-benchmark and redis-py
 - [x] Randomized tests against `TreeSet`, protocol tests, socket integration test
 
-## Phase 2: Durability & expiry
+## Phase 2: Durability, expiry & RESP3
+- [ ] RESP3 (`HELLO 3`): redis-py 8 defaults to it; needs map/double/null types
 - [ ] Append-only file (AOF) with `everysec` / `always` fsync, replay on startup
 - [ ] AOF rewrite/compaction
 - [ ] `EXPIRE` / `TTL` with lazy + periodic eviction

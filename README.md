@@ -1,4 +1,60 @@
-# Skip List Rectangle Database
+# Skip List Rectangle Database + SkipDB
+
+This repo contains two things built on skip lists:
+
+1. **SkipDB**: a Redis-compatible in-memory database whose sorted sets run on a
+   custom ranked skip list. Works with `redis-cli` and Redis client libraries.
+2. **Rectangle database**: the original CS 3114 project (below).
+
+## SkipDB
+
+```bash
+mvn -q compile
+java -cp target/classes skipdb.SkipDBServer 6380
+
+redis-cli -p 6380 ZADD board 100 alice 85 bob 92 carol
+redis-cli -p 6380 ZREVRANGE board 0 2 WITHSCORES   # leaderboard top 3
+redis-cli -p 6380 ZREVRANK board carol              # -> 1
+```
+
+```python
+import redis  # redis-py; use protocol=2 (SkipDB speaks RESP2)
+r = redis.Redis(port=6380, protocol=2, decode_responses=True)
+r.zincrby("board", 10, "bob")
+r.zrangebyscore("board", 90, "+inf", withscores=True)
+```
+
+**How it works**
+
+- `RankedSkipList`: every forward link stores its *span* (how many nodes it
+  skips), so summing spans along the search path gives an element's rank.
+  Insert, delete, rank, select-by-rank and score lookups are all expected
+  O(log n). This is the same design Redis uses for `ZSET`.
+- `SortedSet`: hash map (member → score, O(1) `ZSCORE`) + ranked skip list.
+- `Resp`: RESP2 parser/encoder, including inline commands and pipelining.
+- `SkipDBServer`: thread-per-client TCP server; commands execute under one
+  lock, so there are no data races (Redis's single-threaded execution model).
+  `MULTI`/`EXEC`/`DISCARD` run queued commands as one atomic batch.
+
+**Commands:** `ZADD ZINCRBY ZSCORE ZCARD ZREM ZRANK ZREVRANK ZRANGE ZREVRANGE
+ZRANGEBYSCORE ZCOUNT`, `SET GET DEL EXISTS TYPE KEYS DBSIZE FLUSHALL`,
+`PING ECHO INFO HELLO CLIENT SELECT COMMAND`, `MULTI EXEC DISCARD`, `QUIT`.
+
+**First numbers** (`redis-benchmark`, 20 clients, dev container; not a tuned
+benchmark yet, see the roadmap): ~80k `GET`/`SET` per second and ~44k `ZADD`
+per second into a sorted set growing to ~63k members, p50 ≈ 0.2 ms.
+
+**Tests:** 20,000 random operations checked against a `TreeSet` model, RESP
+encoding edge cases (UTF-8 byte lengths, malformed input), command semantics,
+and socket tests for pipelining, transactions, protocol errors and 8
+concurrent clients. Also verified against real `redis-cli`, `redis-benchmark`
+and `redis-py`.
+
+See [ROADMAP.md](ROADMAP.md) for persistence, expiry, benchmarks and the demo.
+
+---
+
+## Rectangle database (original project)
 
 A Java implementation of a **skip list** used as an in-memory database of named
 rectangles on a 1024×1024 grid. Commands are read from a text file to insert,
@@ -18,7 +74,7 @@ remove, search, and run spatial queries over the rectangles.
 
 ## Build & run
 
-Requires Java 11+ and Maven.
+Requires Java 11+ and Maven. Run all tests with `mvn test`.
 
 ```bash
 mvn test                                   # run the test suite
