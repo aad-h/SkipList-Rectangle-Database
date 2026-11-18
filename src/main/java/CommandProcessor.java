@@ -41,72 +41,78 @@ public class CommandProcessor {
      *            a single line from the text file
      */
     public void processor(String line) {
-        // converts the string of the line into an
-        // array of its space (" ") delimited elements
-        String[] arr = line.split("\\s{1,}");
-        String command = arr[0]; // the command will be the first of these
-                                 // elements
-        // calls the insert function and passes the correct
-        // parameters by converting the string integers into
-        // their Integer equivalent, trimming the whitespace
-        if (command.equals("insert")) {
-            // Calls insert
-            String s = arr[1];
-            Rectangle rec = new Rectangle(Integer.parseInt(arr[2]), Integer
-                .parseInt(arr[3]), Integer.parseInt(arr[4]), Integer.parseInt(
-                    arr[5]));
-            KVPair<String, Rectangle> p = new KVPair<String, Rectangle>(s, rec);
-            data.insert(p);
-        }
-        // calls the appropriate remove method based on the
-        // number of white space delimited strings in the line
-        else if (command.equals("remove")) {
-            // checks the number of white space delimited strings in the line
-            int numParam = arr.length - 1;
-            if (numParam == 1) {
-                // Calls remove by name
-                data.remove(arr[1]);
+        String[] arr = line.trim().split("\\s+");
+        String command = arr[0];
+        try {
+            switch (command) {
+                case "insert":
+                    requireArgs(arr, 5);
+                    data.insert(new KVPair<String, Rectangle>(arr[1],
+                        new Rectangle(toInt(arr[2]), toInt(arr[3]), toInt(
+                            arr[4]), toInt(arr[5]))));
+                    break;
+                case "remove":
+                    // remove <name>  or  remove <x> <y> <w> <h>
+                    if (arr.length == 2) {
+                        data.remove(arr[1]);
+                    }
+                    else {
+                        requireArgs(arr, 4);
+                        data.remove(toInt(arr[1]), toInt(arr[2]), toInt(
+                            arr[3]), toInt(arr[4]));
+                    }
+                    break;
+                case "regionsearch":
+                    requireArgs(arr, 4);
+                    data.regionsearch(toInt(arr[1]), toInt(arr[2]), toInt(
+                        arr[3]), toInt(arr[4]));
+                    break;
+                case "intersections":
+                    requireArgs(arr, 0);
+                    data.intersections();
+                    break;
+                case "search":
+                    requireArgs(arr, 1);
+                    data.search(arr[1]);
+                    break;
+                case "dump":
+                    requireArgs(arr, 0);
+                    data.dump();
+                    break;
+                default:
+                    System.out.println("Unrecognized command.");
             }
-            else if (numParam == 4) {
-                // Calls remove by coordinate, converting string
-                // integers into their Integer equivalent minus whitespace
-                data.remove(Integer.parseInt(arr[1]), Integer.parseInt(arr[2]),
-                    Integer.parseInt(arr[3]), Integer.parseInt(arr[4]));
-
-            }
-
         }
-        else if (command.equals("regionsearch")) {
-            // calls the regionsearch method for a set of coordinates
-            // the string integers in the line will be trimmed of whitespace
-            data.regionsearch(Integer.parseInt(arr[1]), Integer.parseInt(
-                arr[2]), Integer.parseInt(arr[3]), Integer.parseInt(arr[4]));
-
+        catch (IllegalArgumentException e) {
+            // covers NumberFormatException and wrong argument counts, so one
+            // malformed line is reported instead of crashing the whole run
+            System.out.println("Invalid command: " + line.trim() + " ("
+                + e.getMessage() + ")");
         }
-        else if (command.equals("intersections")) {
-            // calls the intersections method, no parameters to be passed
-            // (see the intersections JavaDoc in the Database class for more
-            // information)
-            data.intersections();
+    }
 
-        }
-        else if (command.equals("search")) {
-            // calls the search method for a name of object
-            data.search(arr[1]);
 
+    /**
+     * Ensures a command has exactly the expected number of arguments.
+     */
+    private static void requireArgs(String[] arr, int expected) {
+        int actual = arr.length - 1;
+        if (actual != expected) {
+            throw new IllegalArgumentException("expected " + expected
+                + " argument(s), got " + actual);
         }
-        else if (command.equals("dump")) {
-            // calls the dump method for the database, takes no parameters
-            // (see the dump() JavaDoc in the Database class for more
-            // information)
-            data.dump();
+    }
 
+
+    /**
+     * Parses an integer argument with a readable error message.
+     */
+    private static int toInt(String s) {
+        try {
+            return Integer.parseInt(s);
         }
-        else {
-            // the first white space delimited string in the line is not
-            // one of the commands which can manipulate the database,
-            // a message will be written to the console
-            System.out.println("Unrecognized command.");
+        catch (NumberFormatException e) {
+            throw new IllegalArgumentException("not an integer: " + s);
         }
     }
 

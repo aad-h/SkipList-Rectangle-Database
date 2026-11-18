@@ -218,4 +218,12 @@ public class RectangleTest extends TestCase {
         Rectangle mixedInvalid2 = new Rectangle(1024, 500, 3, 500);
         assertTrue(mixedInvalid2.isInvalid());
     }
+
+    /**
+     * Equal rectangles have equal hash codes.
+     */
+    public void testHashCodeMatchesEquals() {
+        assertEquals(new Rectangle(1, 2, 3, 4).hashCode(), new Rectangle(1, 2,
+            3, 4).hashCode());
+    }
 }

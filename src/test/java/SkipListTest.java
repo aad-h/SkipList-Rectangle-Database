@@ -416,4 +416,72 @@ public class SkipListTest extends TestCase {
         assertEquals(expectedLevelValue, randomLevelValue);
     }
 
+
+    // ----------------------------------------------------------
+    /**
+     * removeByValue must remove the matching rectangle even when another
+     * rectangle shares its key (regression: it used to remove the first pair
+     * with that key instead).
+     */
+    public void testRemoveByValueWithDuplicateKeys() {
+        Rectangle a = new Rectangle(1, 1, 2, 2);
+        Rectangle b = new Rectangle(5, 5, 2, 2);
+        sl = new SkipList<String, Rectangle>(new java.util.Random(7));
+        sl.insert(new KVPair<>("r", a));
+        sl.insert(new KVPair<>("r", b));
+        sl.insert(new KVPair<>("s", new Rectangle(9, 9, 1, 1)));
+
+        assertEquals(b, sl.removeByValue(b).getValue());
+        assertEquals(2, sl.size());
+        ArrayList<KVPair<String, Rectangle>> left = sl.search("r");
+        assertEquals(1, left.size());
+        assertEquals(a, left.get(0).getValue());
+        assertNull(sl.removeByValue(b));
+    }
+
+
+    // ----------------------------------------------------------
+    /**
+     * Stress test: random inserts/removes stay sorted and sized correctly.
+     */
+    public void testRandomOperationsKeepListSorted() {
+        java.util.Random r = new java.util.Random(42);
+        sl = new SkipList<String, Rectangle>(new java.util.Random(1));
+        java.util.List<String> model = new java.util.ArrayList<>();
+        for (int n = 0; n < 2000; n++) {
+            String key = "k" + r.nextInt(50);
+            if (r.nextInt(3) == 0) {
+                boolean removed = sl.remove(key) != null;
+                assertEquals(model.remove(key), removed);
+            }
+            else {
+                sl.insert(new KVPair<>(key, new Rectangle(1, 1, 1, 1)));
+                model.add(key);
+            }
+            assertEquals(model.size(), sl.size());
+        }
+        java.util.Collections.sort(model);
+        java.util.List<String> actual = new java.util.ArrayList<>();
+        for (KVPair<String, Rectangle> p : sl) {
+            actual.add(p.getKey());
+        }
+        assertEquals(model, actual);
+    }
+
+
+    // ----------------------------------------------------------
+    /**
+     * Iterating past the end throws NoSuchElementException, not NPE.
+     */
+    public void testIteratorPastEnd() {
+        Iterator<KVPair<String, Rectangle>> it = sl.iterator();
+        assertFalse(it.hasNext());
+        try {
+            it.next();
+            fail("expected NoSuchElementException");
+        }
+        catch (java.util.NoSuchElementException expected) {
+            // expected
+        }
+    }
 }

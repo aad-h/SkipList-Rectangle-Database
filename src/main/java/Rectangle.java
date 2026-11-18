@@ -107,6 +107,7 @@ public class Rectangle {
      * @return true if the rectangle has the same coordinates as rec, false if
      *         not
      */
+    @Override
     public boolean equals(Object rec) {
         if (rec == null) {
             return false;
@@ -126,6 +127,19 @@ public class Rectangle {
         else {
             return false;
         }
+    }
+
+
+    /**
+     * Hash code consistent with equals(), so Rectangles work in hash-based
+     * collections.
+     *
+     * @return hash of the coordinates and dimensions
+     */
+    @Override
+    public int hashCode() {
+        return java.util.Objects.hash(xCoordinate, yCoordinate, width,
+            height);
     }
 
 

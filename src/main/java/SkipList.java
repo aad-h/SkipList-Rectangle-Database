@@ -2,6 +2,7 @@
 import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.NoSuchElementException;
 import java.util.Random;
 
 /**
@@ -18,6 +19,9 @@ import java.util.Random;
  */
 public class SkipList<K extends Comparable<? super K>, V>
     implements Iterable<KVPair<K, V>> {
+    // cap on node height; 2^32 entries is far beyond any realistic list
+    private static final int MAX_LEVEL = 32;
+
     private SkipNode head; // First element (Sentinel Node)
     private int size; // number of entries in the Skip List
     private int level;
@@ -52,9 +56,9 @@ public class SkipList<K extends Comparable<? super K>, V>
      * @return random level int from geometric distribution
      */
     public int randomLevel() {
-        int lev;
-        for (lev = 1; rng.nextBoolean(); lev++) {
-
+        int lev = 1;
+        while (lev < MAX_LEVEL && rng.nextBoolean()) {
+            lev++;
         }
         return lev;
     }
@@ -154,71 +158,81 @@ public class SkipList<K extends Comparable<? super K>, V>
 
 
     /**
-     * Removes the KVPair that is passed in as a parameter and returns true if
-     * the pair was valid and false if not.
-     * 
+     * Removes the first KVPair with the given key.
+     *
      * @param key
-     *            the Key of the pair to be removed
-     * @return returns the removed pair if the pair was valid and null if not
+     *            the key of the pair to be removed
+     * @return the removed pair, or null if no pair has that key
      */
-
-    @SuppressWarnings("unchecked")
     public KVPair<K, V> remove(K key) {
-        SkipNode[] update = (SkipList<K, V>.SkipNode[])Array.newInstance(
-            SkipNode.class, level + 1);
         SkipNode x = head;
         for (int i = level; i >= 0; i--) {
-            while ((x.forward[i] != null) && (x.forward[i].element().getKey()
-                .compareTo(key) < 0)) {
-
+            while (x.forward[i] != null && x.forward[i].element().getKey()
+                .compareTo(key) < 0) {
                 x = x.forward[i];
             }
-            update[i] = x;
         }
-        x = x.forward[0];
-        if ((x != null) && (x.element().getKey().compareTo(key) == 0)) {
-            KVPair<K, V> value = x.element();
-            for (int i = 0; i <= level; i++) {
-                if (update[i].forward[i] != x) {
-                    break;
-                }
-                update[i].forward[i] = x.forward[i];
-            }
-            while (level > 0 && head.forward[level] == null) {
-                level--;
-            }
-            size--;
-            return value;
+        SkipNode target = x.forward[0];
+        if (target == null || target.element().getKey().compareTo(key) != 0) {
+            return null;
         }
-        return null;
-
+        unlink(target);
+        return target.element();
     }
 
 
     /**
-     * Removes a KVPair with the specified value.
-     * 
+     * Removes the first KVPair (in key order) whose value equals val. Unlike
+     * removing by key, this removes that exact node, so it is correct even
+     * when several pairs share the same key.
+     *
      * @param val
      *            the value of the KVPair to be removed
-     * @return returns true if the removal was successful
+     * @return the removed pair, or null if no pair has that value
      */
     public KVPair<K, V> removeByValue(V val) {
-        SkipNode x = head;
-
-        while (x.forward[0] != null) {
-            if (x.forward[0].element().getValue().equals(val)) {
-                KVPair<K, V> removed = remove(x.forward[0].element().getKey());
-
-                return removed;
-
-            }
-            else {
-                x = x.forward[0];
-            }
-
+        SkipNode x = head.forward[0];
+        while (x != null && !x.element().getValue().equals(val)) {
+            x = x.forward[0];
         }
-        return null;
+        if (x == null) {
+            return null;
+        }
+        unlink(x);
+        return x.element();
+    }
 
+
+    /**
+     * Splices a specific node out of every level it appears on, then shrinks
+     * the list's level if the top levels became empty.
+     *
+     * @param target
+     *            a node currently in the list
+     */
+    private void unlink(SkipNode target) {
+        K key = target.element().getKey();
+        SkipNode x = head;
+        for (int i = level; i >= 0; i--) {
+            // advance past all keys strictly smaller than the target's key
+            while (x.forward[i] != null && x.forward[i].element().getKey()
+                .compareTo(key) < 0) {
+                x = x.forward[i];
+            }
+            // among equal keys, walk to the node just before target
+            SkipNode p = x;
+            while (p.forward[i] != null && p.forward[i] != target
+                && p.forward[i].element().getKey().compareTo(key) == 0) {
+                p = p.forward[i];
+            }
+            if (p.forward[i] == target) {
+                p.forward[i] = target.forward[i];
+            }
+        }
+        while (level > 0 && head.forward[level] == null) {
+            level--;
+        }
+        size--;
     }
 
 
@@ -231,15 +245,8 @@ public class SkipList<K extends Comparable<? super K>, V>
         while (current != null) {
             int depth = current.forward.length;
             KVPair<K, V> value = current.element();
-            String node = "";
-            if (value != null) {
-                node += "Node with depth " + depth + ", Value " + value;
-            }
-            else {
-                node += "Node with depth " + depth + ", Value " + value;
-
-            }
-            System.out.println(node);
+            System.out.println("Node with depth " + depth + ", Value "
+                + value);
             current = current.forward[0];
         }
         System.out.println("SkipList size is: " + size);
@@ -307,6 +314,9 @@ public class SkipList<K extends Comparable<? super K>, V>
 
         @Override
         public KVPair<K, V> next() {
+            if (!hasNext()) {
+                throw new NoSuchElementException();
+            }
             KVPair<K, V> elem = current.forward[0].element();
             current = current.forward[0];
             return elem;

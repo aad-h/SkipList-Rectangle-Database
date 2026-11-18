@@ -67,7 +67,8 @@ public class CommandProcessorTest extends TestCase {
             .getHistory());
         systemOut().clearHistory();
         cp.processor("remove 1 1 20 10 10");
-        assertEquals("", systemOut().getHistory());
+        assertEquals("Invalid command: remove 1 1 20 10 10 (expected 4 "
+            + "argument(s), got 5)\n", systemOut().getHistory());
 
         cp.processor("insert r1 1 1 10 10");
         cp.processor("insert r2 1 1 10 10");
@@ -93,4 +94,25 @@ public class CommandProcessorTest extends TestCase {
             .getHistory());
     }
 
+
+    /**
+     * Malformed lines are reported and processing continues.
+     */
+    public void testMalformedCommands() {
+        CommandProcessor cp = new CommandProcessor();
+        cp.processor("insert r1 1 2");
+        assertEquals("Invalid command: insert r1 1 2 (expected 5 argument(s), "
+            + "got 3)\n", systemOut().getHistory());
+        systemOut().clearHistory();
+        cp.processor("regionsearch 1 x 3 4");
+        assertEquals("Invalid command: regionsearch 1 x 3 4 (not an integer: "
+            + "x)\n", systemOut().getHistory());
+        systemOut().clearHistory();
+        cp.processor("search");
+        assertTrue(systemOut().getHistory().startsWith("Invalid command"));
+        systemOut().clearHistory();
+        cp.processor("insert ok 1 1 2 2");
+        assertEquals("Rectangle inserted: (ok, 1, 1, 2, 2)\n", systemOut()
+            .getHistory());
+    }
 }
