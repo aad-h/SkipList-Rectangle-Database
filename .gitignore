@@ -9,3 +9,4 @@ Thumbs.db
 *.war
 *.ear
 hs_error_pid*
+/target/

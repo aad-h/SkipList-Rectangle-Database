@@ -1,4 +1,4 @@
-import student.TestCase;
+import testsupport.TestCase;
 
 /**
  * This class tests the methods of Rectangle1 class

@@ -1,4 +1,4 @@
-import student.TestCase;
+import testsupport.TestCase;
 
 /**
  * This class tests the KVPair class so that the member methods work properly

@@ -1,8 +1,7 @@
 import java.util.ArrayList;
 import java.util.Iterator;
 
-import student.TestCase;
-import student.TestableRandom;
+import testsupport.TestCase;
 
 /**
  * This class tests the methods of SkipList class
@@ -310,11 +309,11 @@ public class SkipListTest extends TestCase {
 
     /***
      * Example 1: Test `randomLevel` method with
-     * predetermined random values using `TestableRandom`
+     * predetermined random values using a scripted Random
      */
     public void testRandomLevelOne() {
-        TestableRandom.setNextBooleans(false);
-        sl = new SkipList<String, Rectangle>();
+        sl = new SkipList<String, Rectangle>(new testsupport.ScriptedRandom(
+            false));
         int randomLevelValue = sl.randomLevel();
 
         // This returns 1 because the first preset
@@ -401,11 +400,11 @@ public class SkipListTest extends TestCase {
 
     /***
      * Example 2: Test `randomLevel` method with
-     * predetermined random values using `TestableRandom`
+     * predetermined random values using a scripted Random
      */
     public void testRandomLevelFour() {
-        TestableRandom.setNextBooleans(true, true, true, false, true, false);
-        sl = new SkipList<String, Rectangle>();
+        sl = new SkipList<String, Rectangle>(new testsupport.ScriptedRandom(
+            true, true, true, false, true, false));
         int randomLevelValue = sl.randomLevel();
 
         // This returns 4 because the fourth preset

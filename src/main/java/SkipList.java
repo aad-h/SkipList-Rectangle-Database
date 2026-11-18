@@ -3,7 +3,6 @@ import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Random;
-import student.TestableRandom;
 
 /**
  * This class implements SkipList data structure and contains an inner SkipNode
@@ -25,12 +24,24 @@ public class SkipList<K extends Comparable<? super K>, V>
     private Random rng;
 
     /**
-     * Initializes the fields head, size and level
+     * Initializes an empty SkipList with a default random source.
      */
     public SkipList() {
+        this(new Random());
+    }
+
+
+    /**
+     * Initializes an empty SkipList that draws node levels from the given
+     * random source (pass a seeded or scripted Random for deterministic tests).
+     *
+     * @param rng
+     *            source of coin flips for randomLevel()
+     */
+    public SkipList(Random rng) {
         head = new SkipNode(null, 0);
         size = 0;
-        this.rng = new TestableRandom();
+        this.rng = rng;
         level = -1;
     }
 
