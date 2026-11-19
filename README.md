@@ -17,6 +17,21 @@ redis-cli -p 6380 ZREVRANGE board 0 2 WITHSCORES   # leaderboard top 3
 redis-cli -p 6380 ZREVRANK board carol              # -> 1
 ```
 
+**Persistence:** start with `--aof <path>` to keep an append-only file. Every
+successful write (`SET DEL FLUSHALL ZADD ZINCRBY ZREM`) is appended as the RESP
+command a client would send and flushed before the reply goes out; the file is
+replayed on startup, so data survives a restart or `kill`.
+
+```bash
+java -cp target/classes skipdb.SkipDBServer 6380 --aof appendonly.aof
+```
+
+Transactions are logged inside `MULTI`/`EXEC` and only applied on replay once
+their `EXEC` is read. A torn last write (crash mid-append) is truncated away on
+load, like Redis's `aof-load-truncated yes`; any other corruption refuses to
+start. Writes are not fsynced yet (fsync policy and `BGREWRITEAOF` are next
+on the roadmap).
+
 ```python
 import redis  # redis-py; use protocol=2 (SkipDB speaks RESP2)
 r = redis.Redis(port=6380, protocol=2, decode_responses=True)
@@ -35,6 +50,7 @@ r.zrangebyscore("board", 90, "+inf", withscores=True)
 - `SkipDBServer`: thread-per-client TCP server; commands execute under one
   lock, so there are no data races (Redis's single-threaded execution model).
   `MULTI`/`EXEC`/`DISCARD` run queued commands as one atomic batch.
+- `Aof`: append-only file writer and crash-tolerant replayer.
 
 **Commands:** `ZADD ZINCRBY ZSCORE ZCARD ZREM ZRANK ZREVRANK ZRANGE ZREVRANGE
 ZRANGEBYSCORE ZCOUNT`, `SET GET DEL EXISTS TYPE KEYS DBSIZE FLUSHALL`,
@@ -46,8 +62,9 @@ per second into a sorted set growing to ~63k members, p50 ≈ 0.2 ms.
 
 **Tests:** 20,000 random operations checked against a `TreeSet` model, RESP
 encoding edge cases (UTF-8 byte lengths, malformed input), command semantics,
-and socket tests for pipelining, transactions, protocol errors and 8
-concurrent clients. Also verified against real `redis-cli`, `redis-benchmark`
+socket tests for pipelining, transactions, protocol errors and 8
+concurrent clients, and AOF tests (restart round-trip, a torn write cut at
+every byte offset, unfinished transactions, corrupt files). Also verified against real `redis-cli`, `redis-benchmark`
 and `redis-py`.
 
 See [ROADMAP.md](ROADMAP.md) for persistence, expiry, benchmarks and the demo.

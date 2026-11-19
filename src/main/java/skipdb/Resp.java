@@ -116,7 +116,11 @@ public final class Resp {
         }
         List<String> args = new ArrayList<>(n);
         for (int i = 0; i < n; i++) {
-            if (in.read() != '$') {
+            int t = in.read();
+            if (t == -1) {
+                throw new EOFException();
+            }
+            if (t != '$') {
                 throw new ProtocolException("expected '$'");
             }
             int len = parseInt(readLine(in));
@@ -127,7 +131,12 @@ public final class Resp {
             if (buf.length < len) {
                 throw new EOFException();
             }
-            if (in.read() != '\r' || in.read() != '\n') {
+            int cr = in.read();
+            int lf = cr == -1 ? -1 : in.read();
+            if (lf == -1) {
+                throw new EOFException();
+            }
+            if (cr != '\r' || lf != '\n') {
                 throw new ProtocolException("expected CRLF after bulk string");
             }
             args.add(new String(buf, StandardCharsets.UTF_8));

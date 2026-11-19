@@ -3,6 +3,7 @@ package skipdb;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -23,6 +24,19 @@ public final class CommandHandler {
         CommandError(String msg) {
             super(msg);
         }
+    }
+
+    /** Commands that can modify the keyspace and so are written to the AOF. */
+    private static final Set<String> WRITE_COMMANDS = Set.of("set", "del",
+        "flushall", "flushdb", "zadd", "zincrby", "zrem");
+
+    /**
+     * @param name
+     *            a command name, any case
+     * @return true if the command may modify data (and must be persisted)
+     */
+    public static boolean isWriteCommand(String name) {
+        return WRITE_COMMANDS.contains(name.toLowerCase(Locale.ROOT));
     }
 
     private static final String WRONGTYPE =

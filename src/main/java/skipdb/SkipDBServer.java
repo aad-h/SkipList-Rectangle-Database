@@ -7,6 +7,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -20,8 +22,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * lock (Redis's model: no data races, no per-structure locking). MULTI/EXEC
  * transactions queue commands per connection and run them as one atomic batch.
  *
+ * <p>With an append-only file ({@code --aof path}) every successful write is
+ * logged before its reply is sent, and the file is replayed on startup.
+ *
  * <pre>
- * java -cp target/classes skipdb.SkipDBServer [port]   # default 6380
+ * java -cp target/classes skipdb.SkipDBServer [port] [--aof appendonly.aof]
  * redis-cli -p 6380 ZADD board 100 alice
  * </pre>
  */
@@ -31,6 +36,7 @@ public final class SkipDBServer implements AutoCloseable {
 
     private final CommandHandler handler = new CommandHandler();
     private final ServerSocket server;
+    private final Aof aof; // null when persistence is off
     private final ExecutorService pool = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "skipdb-client");
         t.setDaemon(true);
@@ -43,7 +49,38 @@ public final class SkipDBServer implements AutoCloseable {
      * Binds to the given port (0 picks a free port).
      */
     public SkipDBServer(int port) throws IOException {
-        server = new ServerSocket(port);
+        this(port, null);
+    }
+
+
+    /**
+     * Binds to the given port (0 picks a free port), first replaying the
+     * append-only file at {@code aofPath} if it is non-null.
+     *
+     * @throws IOException
+     *             if the port cannot be bound or the AOF is unreadable/corrupt
+     */
+    public SkipDBServer(int port, Path aofPath) throws IOException {
+        if (aofPath != null) {
+            aof = new Aof(aofPath);
+            long n = aof.load(handler);
+            if (n > 0) {
+                System.out.println("AOF: loaded " + n + " commands from "
+                    + aofPath);
+            }
+        }
+        else {
+            aof = null;
+        }
+        try {
+            server = new ServerSocket(port);
+        }
+        catch (IOException e) {
+            if (aof != null) {
+                aof.close();
+            }
+            throw e;
+        }
     }
 
 
@@ -131,8 +168,16 @@ public final class SkipDBServer implements AutoCloseable {
                         // run the whole batch under one lock: atomic w.r.t. other clients
                         List<Object> results = new ArrayList<>(queued.size());
                         synchronized (handler) {
+                            List<List<String>> writes = new ArrayList<>();
                             for (List<String> q : queued) {
-                                results.add(handler.execute(q));
+                                Object r = handler.execute(q);
+                                results.add(r);
+                                if (persists(q, r)) {
+                                    writes.add(q);
+                                }
+                            }
+                            if (aof != null) {
+                                logToAof(writes);
                             }
                         }
                         queued = null;
@@ -146,6 +191,9 @@ public final class SkipDBServer implements AutoCloseable {
                 else {
                     synchronized (handler) {
                         reply = handler.execute(cmd);
+                        if (persists(cmd, reply)) {
+                            logToAof(List.of(cmd));
+                        }
                     }
                 }
                 Resp.write(out, reply);
@@ -164,6 +212,25 @@ public final class SkipDBServer implements AutoCloseable {
     }
 
 
+    /** True if AOF is on and {@code cmd} is a write that succeeded. */
+    private boolean persists(List<String> cmd, Object reply) {
+        return aof != null && !(reply instanceof Resp.Error) && CommandHandler
+            .isWriteCommand(cmd.get(0));
+    }
+
+
+    private void logToAof(List<List<String>> writes) {
+        try {
+            aof.appendTransaction(writes);
+        }
+        catch (IOException e) {
+            System.err.println("AOF: write to " + aof.path() + " failed: " + e
+                .getMessage());
+        }
+    }
+
+
+    /** @return the number of clients currently connected */
     public long connectedClients() {
         return clients.get();
     }
@@ -174,12 +241,26 @@ public final class SkipDBServer implements AutoCloseable {
         running = false;
         server.close();
         pool.shutdownNow();
+        if (aof != null) {
+            synchronized (handler) {
+                aof.close();
+            }
+        }
     }
 
 
     public static void main(String[] args) throws IOException {
-        int port = args.length > 0 ? Integer.parseInt(args[0]) : 6380;
-        SkipDBServer srv = new SkipDBServer(port);
+        int port = 6380;
+        Path aofPath = null;
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("--aof") && i + 1 < args.length) {
+                aofPath = Paths.get(args[++i]);
+            }
+            else {
+                port = Integer.parseInt(args[i]);
+            }
+        }
+        SkipDBServer srv = new SkipDBServer(port, aofPath);
         System.out.println("SkipDB listening on port " + srv.port()
             + "  (try: redis-cli -p " + srv.port() + " ping)");
         srv.serve();
