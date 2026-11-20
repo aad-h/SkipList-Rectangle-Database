@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -24,9 +26,12 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <p>With an append-only file ({@code --aof path}) every successful write is
  * logged before its reply is sent, and the file is replayed on startup.
+ * {@code --appendfsync always|everysec|no} picks when it is fsynced (default
+ * {@code everysec}), and {@code BGREWRITEAOF} compacts it in the background.
  *
  * <pre>
  * java -cp target/classes skipdb.SkipDBServer [port] [--aof appendonly.aof]
+ *     [--appendfsync everysec]
  * redis-cli -p 6380 ZADD board 100 alice
  * </pre>
  */
@@ -37,6 +42,7 @@ public final class SkipDBServer implements AutoCloseable {
     private final CommandHandler handler = new CommandHandler();
     private final ServerSocket server;
     private final Aof aof; // null when persistence is off
+    private final ScheduledExecutorService fsyncTimer; // everysec only
     private final ExecutorService pool = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "skipdb-client");
         t.setDaemon(true);
@@ -61,8 +67,23 @@ public final class SkipDBServer implements AutoCloseable {
      *             if the port cannot be bound or the AOF is unreadable/corrupt
      */
     public SkipDBServer(int port, Path aofPath) throws IOException {
+        this(port, aofPath, Aof.Fsync.EVERYSEC);
+    }
+
+
+    /**
+     * Binds to the given port (0 picks a free port), first replaying the
+     * append-only file at {@code aofPath} if it is non-null.
+     *
+     * @param fsync
+     *            the AOF fsync policy; ignored when {@code aofPath} is null
+     * @throws IOException
+     *             if the port cannot be bound or the AOF is unreadable/corrupt
+     */
+    public SkipDBServer(int port, Path aofPath, Aof.Fsync fsync)
+        throws IOException {
         if (aofPath != null) {
-            aof = new Aof(aofPath);
+            aof = new Aof(aofPath, fsync);
             long n = aof.load(handler);
             if (n > 0) {
                 System.out.println("AOF: loaded " + n + " commands from "
@@ -81,6 +102,35 @@ public final class SkipDBServer implements AutoCloseable {
             }
             throw e;
         }
+        if (aof != null && fsync == Aof.Fsync.EVERYSEC) {
+            fsyncTimer = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "skipdb-aof-fsync");
+                t.setDaemon(true);
+                return t;
+            });
+            fsyncTimer.scheduleWithFixedDelay(this::fsyncTick, 1, 1,
+                TimeUnit.SECONDS);
+        }
+        else {
+            fsyncTimer = null;
+        }
+    }
+
+
+    private void fsyncTick() {
+        try {
+            aof.fsyncIfDirty();
+        }
+        catch (IOException e) {
+            System.err.println("AOF: fsync of " + aof.path() + " failed: " + e
+                .getMessage());
+        }
+    }
+
+
+    /** @return the AOF, or null when persistence is off */
+    public Aof aof() {
+        return aof;
     }
 
 
@@ -170,7 +220,7 @@ public final class SkipDBServer implements AutoCloseable {
                         synchronized (handler) {
                             List<List<String>> writes = new ArrayList<>();
                             for (List<String> q : queued) {
-                                Object r = handler.execute(q);
+                                Object r = run(q);
                                 results.add(r);
                                 if (persists(q, r)) {
                                     writes.add(q);
@@ -190,7 +240,7 @@ public final class SkipDBServer implements AutoCloseable {
                 }
                 else {
                     synchronized (handler) {
-                        reply = handler.execute(cmd);
+                        reply = run(cmd);
                         if (persists(cmd, reply)) {
                             logToAof(List.of(cmd));
                         }
@@ -209,6 +259,33 @@ public final class SkipDBServer implements AutoCloseable {
         finally {
             clients.decrementAndGet();
         }
+    }
+
+
+    /**
+     * Executes one command; caller holds the handler lock. Server-level
+     * commands that need the AOF are handled here, the rest by the handler.
+     */
+    private Object run(List<String> cmd) {
+        if (cmd.get(0).equalsIgnoreCase("bgrewriteaof")) {
+            if (cmd.size() != 1) {
+                return new Resp.Error(
+                    "ERR wrong number of arguments for 'bgrewriteaof' command");
+            }
+            if (aof == null) {
+                return new Resp.Error(
+                    "ERR Append only file is not enabled (start with --aof)");
+            }
+            if (aof.rewriteInProgress()) {
+                return new Resp.Error(
+                    "ERR Background append only file rewriting already in progress");
+            }
+            // snapshot and start under the lock: later writes hit the buffer
+            aof.rewrite(handler.rewriteCommands());
+            return new Resp.Simple(
+                "Background append only file rewriting started");
+        }
+        return handler.execute(cmd);
     }
 
 
@@ -241,6 +318,9 @@ public final class SkipDBServer implements AutoCloseable {
         running = false;
         server.close();
         pool.shutdownNow();
+        if (fsyncTimer != null) {
+            fsyncTimer.shutdownNow();
+        }
         if (aof != null) {
             synchronized (handler) {
                 aof.close();
@@ -252,15 +332,19 @@ public final class SkipDBServer implements AutoCloseable {
     public static void main(String[] args) throws IOException {
         int port = 6380;
         Path aofPath = null;
+        Aof.Fsync fsync = Aof.Fsync.EVERYSEC;
         for (int i = 0; i < args.length; i++) {
             if (args[i].equals("--aof") && i + 1 < args.length) {
                 aofPath = Paths.get(args[++i]);
+            }
+            else if (args[i].equals("--appendfsync") && i + 1 < args.length) {
+                fsync = Aof.Fsync.parse(args[++i]);
             }
             else {
                 port = Integer.parseInt(args[i]);
             }
         }
-        SkipDBServer srv = new SkipDBServer(port, aofPath);
+        SkipDBServer srv = new SkipDBServer(port, aofPath, fsync);
         System.out.println("SkipDB listening on port " + srv.port()
             + "  (try: redis-cli -p " + srv.port() + " ping)");
         srv.serve();

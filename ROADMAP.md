@@ -24,8 +24,8 @@ Target resume line:
 
 ## Phase 2: Durability, expiry & RESP3
 - [ ] RESP3 (`HELLO 3`): redis-py 8 defaults to it; needs map/double/null types
-- [ ] Append-only file (AOF) with `everysec` / `always` fsync, replay on startup
-- [ ] AOF rewrite/compaction
+- [x] Append-only file (AOF) with `everysec` / `always` fsync, replay on startup
+- [x] AOF rewrite/compaction
 - [ ] `EXPIRE` / `TTL` with lazy + periodic eviction
 - [ ] `ZADD` flags: NX, XX, GT, LT, CH, INCR
 
@@ -49,7 +49,7 @@ Each item must ship with tests, keep `OK` from the full suite, and update the
 README if user-visible. Tick the box in the same commit that finishes it.
 
 - [x] 1. AOF persistence: append every write command to `appendonly.aof`, replay it on startup (`--aof <path>` flag)
-- [ ] 2. AOF fsync policy (`always` / `everysec` / `no`) + `BGREWRITEAOF` compaction that rewrites the minimal command set
+- [x] 2. AOF fsync policy (`always` / `everysec` / `no`) + `BGREWRITEAOF` compaction that rewrites the minimal command set
 - [ ] 3. Key expiry: `EXPIRE`, `PEXPIRE`, `TTL`, `PTTL`, `PERSIST`, `SET ... EX/PX`; lazy expiry on access + periodic sampling sweep; injectable clock for tests
 - [ ] 4. `ZADD` flags: `NX`, `XX`, `GT`, `LT`, `CH`, `INCR` with Redis's exact compatibility rules and errors
 - [ ] 5. More sorted-set commands: `ZPOPMIN`, `ZPOPMAX`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZMSCORE`, `ZRANDMEMBER`

@@ -23,14 +23,28 @@ command a client would send and flushed before the reply goes out; the file is
 replayed on startup, so data survives a restart or `kill`.
 
 ```bash
-java -cp target/classes skipdb.SkipDBServer 6380 --aof appendonly.aof
+java -cp target/classes skipdb.SkipDBServer 6380 --aof appendonly.aof --appendfsync everysec
+redis-cli -p 6380 BGREWRITEAOF   # compact the log in the background
 ```
 
 Transactions are logged inside `MULTI`/`EXEC` and only applied on replay once
 their `EXEC` is read. A torn last write (crash mid-append) is truncated away on
 load, like Redis's `aof-load-truncated yes`; any other corruption refuses to
-start. Writes are not fsynced yet (fsync policy and `BGREWRITEAOF` are next
-on the roadmap).
+start.
+
+`--appendfsync` matches Redis's `appendfsync`: `always` fsyncs before every
+reply (no acknowledged write is ever lost), `everysec` (default) fsyncs at most
+once a second from a background thread so at most ~1 s of writes is at risk,
+and `no` leaves it to the OS.
+
+`BGREWRITEAOF` replaces the log with the minimal command set for the current
+data (one `SET` per string, one `ZADD` per 64 members, scores written so they
+parse back bit-for-bit). The snapshot is taken under the command lock, then
+written to a temp file on a background thread while new writes go to the old
+file *and* a rewrite buffer; the buffer is appended, the temp file fsynced and
+atomically renamed over the old one. A failed rewrite leaves the old file in
+use. A second `BGREWRITEAOF` during a rewrite gets Redis's "already in
+progress" error. (Unlike Redis, `BGREWRITEAOF` requires `--aof`.)
 
 ```python
 import redis  # redis-py; use protocol=2 (SkipDB speaks RESP2)
@@ -50,11 +64,13 @@ r.zrangebyscore("board", 90, "+inf", withscores=True)
 - `SkipDBServer`: thread-per-client TCP server; commands execute under one
   lock, so there are no data races (Redis's single-threaded execution model).
   `MULTI`/`EXEC`/`DISCARD` run queued commands as one atomic batch.
-- `Aof`: append-only file writer and crash-tolerant replayer.
+- `Aof`: append-only file writer with fsync policies, crash-tolerant
+  replayer, and background rewrite (compaction).
 
 **Commands:** `ZADD ZINCRBY ZSCORE ZCARD ZREM ZRANK ZREVRANK ZRANGE ZREVRANGE
 ZRANGEBYSCORE ZCOUNT`, `SET GET DEL EXISTS TYPE KEYS DBSIZE FLUSHALL`,
-`PING ECHO INFO HELLO CLIENT SELECT COMMAND`, `MULTI EXEC DISCARD`, `QUIT`.
+`PING ECHO INFO HELLO CLIENT SELECT COMMAND`, `MULTI EXEC DISCARD`,
+`BGREWRITEAOF`, `QUIT`.
 
 **First numbers** (`redis-benchmark`, 20 clients, dev container; not a tuned
 benchmark yet, see the roadmap): ~80k `GET`/`SET` per second and ~44k `ZADD`
@@ -64,7 +80,9 @@ per second into a sorted set growing to ~63k members, p50 ≈ 0.2 ms.
 encoding edge cases (UTF-8 byte lengths, malformed input), command semantics,
 socket tests for pipelining, transactions, protocol errors and 8
 concurrent clients, and AOF tests (restart round-trip, a torn write cut at
-every byte offset, unfinished transactions, corrupt files). Also verified against real `redis-cli`, `redis-benchmark`
+every byte offset, unfinished transactions, corrupt files, fsync counts per
+policy, rewrites that race with concurrent writes, failed rewrites, exact
+score round-trips including `-0` and `inf`). Also verified against real `redis-cli`, `redis-benchmark`
 and `redis-py`.
 
 See [ROADMAP.md](ROADMAP.md) for persistence, expiry, benchmarks and the demo.

@@ -39,6 +39,53 @@ public final class CommandHandler {
         return WRITE_COMMANDS.contains(name.toLowerCase(Locale.ROOT));
     }
 
+    /** Members per ZADD in a rewritten AOF, like Redis's AOF_REWRITE_ITEMS_PER_CMD. */
+    static final int REWRITE_ITEMS_PER_CMD = 64;
+
+    /**
+     * Builds the minimal command set that recreates the current keyspace, for
+     * an AOF rewrite: one {@code SET} per string and one {@code ZADD} per
+     * {@value #REWRITE_ITEMS_PER_CMD} sorted-set members. Keys are emitted in
+     * sorted order so the output is deterministic. Scores are written so that
+     * they parse back to the identical double (including {@code -0}).
+     *
+     * @return the commands, safe to use after the keyspace changes further
+     */
+    public List<List<String>> rewriteCommands() {
+        List<String> keys = new ArrayList<>(db.keySet());
+        java.util.Collections.sort(keys);
+        List<List<String>> out = new ArrayList<>();
+        for (String k : keys) {
+            Object v = db.get(k);
+            if (v instanceof String) {
+                out.add(java.util.Arrays.asList("SET", k, (String)v));
+                continue;
+            }
+            List<SortedSet.Entry> es = ((SortedSet)v).range(0, -1, false);
+            for (int i = 0; i < es.size(); i += REWRITE_ITEMS_PER_CMD) {
+                int end = Math.min(es.size(), i + REWRITE_ITEMS_PER_CMD);
+                List<String> cmd = new ArrayList<>(2 + 2 * (end - i));
+                cmd.add("ZADD");
+                cmd.add(k);
+                for (SortedSet.Entry e : es.subList(i, end)) {
+                    cmd.add(exactScore(e.score));
+                    cmd.add(e.member);
+                }
+                out.add(cmd);
+            }
+        }
+        return out;
+    }
+
+
+    /** Like {@link #fmt} but keeps the sign of negative zero. */
+    private static String exactScore(double d) {
+        if (d == 0 && 1 / d < 0) {
+            return "-0";
+        }
+        return fmt(d);
+    }
+
     private static final String WRONGTYPE =
         "WRONGTYPE Operation against a key holding the wrong kind of value";
 
