@@ -1,6 +1,7 @@
 package skipdb;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.io.BufferedInputStream;
 import java.io.IOException;
@@ -191,6 +192,29 @@ public class SkipDBServerTest {
             assertEquals("+QUEUED", c.call("DEL", "z"));
             assertEquals("+OK", c.call("DISCARD"));
             assertEquals("6", c.call("ZSCORE", "z", "a"));
+        }
+    }
+
+
+    @Test
+    public void activeExpiryReclaimsKeysNobodyReads() throws Exception {
+        try (Client c = new Client(server.port())) {
+            assertEquals("+OK", c.call("SET", "session", "x", "PX", "150"));
+            assertEquals("+OK", c.call("SET", "keep", "y"));
+            assertEquals(":1", c.call("ZADD", "board", "1", "a"));
+            assertEquals(":1", c.call("PEXPIRE", "board", "150"));
+            long pttl = Long.parseLong(c.call("PTTL", "board").substring(1));
+            assertTrue(String.valueOf(pttl), pttl > 0 && pttl <= 150);
+            // DBSIZE does not expire keys itself, so only the cron can shrink it
+            long deadline = System.currentTimeMillis() + 3000;
+            String size = c.call("DBSIZE");
+            while (!size.equals(":1") && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20);
+                size = c.call("DBSIZE");
+            }
+            assertEquals(":1", size);
+            assertEquals("y", c.call("GET", "keep"));
+            assertEquals(":-2", c.call("TTL", "session"));
         }
     }
 }

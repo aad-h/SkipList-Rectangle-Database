@@ -29,6 +29,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code --appendfsync always|everysec|no} picks when it is fsynced (default
  * {@code everysec}), and {@code BGREWRITEAOF} compacts it in the background.
  *
+ * <p>A cron thread runs Redis's active expiry ten times a second, deleting
+ * keys whose TTL has passed even if no client touches them again.
+ *
  * <pre>
  * java -cp target/classes skipdb.SkipDBServer [port] [--aof appendonly.aof]
  *     [--appendfsync everysec]
@@ -42,7 +45,7 @@ public final class SkipDBServer implements AutoCloseable {
     private final CommandHandler handler = new CommandHandler();
     private final ServerSocket server;
     private final Aof aof; // null when persistence is off
-    private final ScheduledExecutorService fsyncTimer; // everysec only
+    private final ScheduledExecutorService cron; // active expiry + fsync
     private final ExecutorService pool = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "skipdb-client");
         t.setDaemon(true);
@@ -93,6 +96,7 @@ public final class SkipDBServer implements AutoCloseable {
         else {
             aof = null;
         }
+        handler.setPropagation(aof != null);
         try {
             server = new ServerSocket(port);
         }
@@ -102,17 +106,35 @@ public final class SkipDBServer implements AutoCloseable {
             }
             throw e;
         }
+        cron = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "skipdb-cron");
+            t.setDaemon(true);
+            return t;
+        });
+        cron.scheduleWithFixedDelay(this::expireTick, EXPIRE_PERIOD_MS,
+            EXPIRE_PERIOD_MS, TimeUnit.MILLISECONDS);
         if (aof != null && fsync == Aof.Fsync.EVERYSEC) {
-            fsyncTimer = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "skipdb-aof-fsync");
-                t.setDaemon(true);
-                return t;
-            });
-            fsyncTimer.scheduleWithFixedDelay(this::fsyncTick, 1, 1,
+            cron.scheduleWithFixedDelay(this::fsyncTick, 1, 1,
                 TimeUnit.SECONDS);
         }
-        else {
-            fsyncTimer = null;
+    }
+
+
+    /** Active expiry runs every 100ms, Redis's default {@code hz 10}. */
+    static final long EXPIRE_PERIOD_MS = 100;
+
+    private void expireTick() {
+        try {
+            synchronized (handler) {
+                handler.activeExpireCycle();
+                if (aof != null) {
+                    logToAof(handler.drainPropagated());
+                }
+            }
+        }
+        catch (RuntimeException e) {
+            // never let one failure cancel the periodic task
+            System.err.println("active expire failed: " + e);
         }
     }
 
@@ -220,11 +242,8 @@ public final class SkipDBServer implements AutoCloseable {
                         synchronized (handler) {
                             List<List<String>> writes = new ArrayList<>();
                             for (List<String> q : queued) {
-                                Object r = run(q);
-                                results.add(r);
-                                if (persists(q, r)) {
-                                    writes.add(q);
-                                }
+                                results.add(run(q));
+                                writes.addAll(handler.drainPropagated());
                             }
                             if (aof != null) {
                                 logToAof(writes);
@@ -241,8 +260,8 @@ public final class SkipDBServer implements AutoCloseable {
                 else {
                     synchronized (handler) {
                         reply = run(cmd);
-                        if (persists(cmd, reply)) {
-                            logToAof(List.of(cmd));
+                        if (aof != null) {
+                            logToAof(handler.drainPropagated());
                         }
                     }
                 }
@@ -289,13 +308,6 @@ public final class SkipDBServer implements AutoCloseable {
     }
 
 
-    /** True if AOF is on and {@code cmd} is a write that succeeded. */
-    private boolean persists(List<String> cmd, Object reply) {
-        return aof != null && !(reply instanceof Resp.Error) && CommandHandler
-            .isWriteCommand(cmd.get(0));
-    }
-
-
     private void logToAof(List<List<String>> writes) {
         try {
             aof.appendTransaction(writes);
@@ -318,9 +330,7 @@ public final class SkipDBServer implements AutoCloseable {
         running = false;
         server.close();
         pool.shutdownNow();
-        if (fsyncTimer != null) {
-            fsyncTimer.shutdownNow();
-        }
+        cron.shutdownNow();
         if (aof != null) {
             synchronized (handler) {
                 aof.close();

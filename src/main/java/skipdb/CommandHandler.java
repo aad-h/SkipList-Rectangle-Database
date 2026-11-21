@@ -1,21 +1,105 @@
 package skipdb;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Set;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 /**
  * Executes Redis commands against an in-memory keyspace. Each key holds either
  * a String or a {@link SortedSet}. Not thread-safe: the server serializes
  * calls, like Redis's single-threaded command execution.
+ *
+ * <p>Keys may carry a time to live ({@code EXPIRE}, {@code SET ... EX}, ...).
+ * Like Redis, expired keys are removed two ways: lazily, when a command
+ * touches one, and actively, by {@link #activeExpireCycle()} sampling random
+ * keys with a TTL. Time comes from an injectable millisecond clock.
+ *
+ * <p>For persistence the handler reports, through {@link #drainPropagated()},
+ * the commands that reproduce each change deterministically: relative expiry
+ * times become absolute {@code PEXPIREAT}/{@code PXAT}, and every key that
+ * expires becomes an explicit {@code DEL}, exactly as Redis feeds its AOF.
+ * While {@link #setLoading loading} an AOF, keys never expire (they are
+ * reclaimed once loading ends), so replay is independent of the wall clock.
  */
 public final class CommandHandler {
 
     private final Map<String, Object> db = new HashMap<>();
+    private final Expires expires = new Expires();
+    private final LongSupplier clock;
+    private final Random rnd = new Random();
+    private boolean loading;
+    private boolean propagate;
+    private final List<List<String>> propagated = new ArrayList<>();
+    /** AOF form of the running command; null = as sent, NONE = nothing */
+    private List<String> rewritten;
+    private long expiredKeys;
+
+    private static final List<String> NONE = Collections.emptyList();
+
+    /** Keys sampled per round of the active expiry cycle (Redis: 20). */
+    static final int EXPIRE_SAMPLE = 20;
+
+    /** Wall-clock budget of one active expiry cycle (Redis: 25% of 100ms). */
+    private static final long EXPIRE_BUDGET_NANOS = 25_000_000L;
+
+    /** A handler using the system clock. */
+    public CommandHandler() {
+        this(System::currentTimeMillis);
+    }
+
+
+    /**
+     * @param clock
+     *            the current time in Unix milliseconds; tests pass a fake
+     */
+    public CommandHandler(LongSupplier clock) {
+        this.clock = clock;
+    }
+
+
+    /**
+     * While loading is on, keys never expire and expiry times in the past are
+     * stored rather than deleting the key, so replaying an AOF gives the same
+     * keyspace whenever it runs. Expired keys are reclaimed after loading.
+     */
+    public void setLoading(boolean loading) {
+        this.loading = loading;
+    }
+
+
+    /**
+     * Turns on recording of the commands to persist (off by default so a
+     * handler without an AOF accumulates nothing).
+     */
+    public void setPropagation(boolean on) {
+        propagate = on;
+        if (!on) {
+            propagated.clear();
+        }
+    }
+
+
+    /**
+     * @return the commands to append to the AOF since the last call, in
+     *         order: successful writes in their deterministic form, plus a
+     *         {@code DEL} for every key that expired (lazily or actively)
+     */
+    public List<List<String>> drainPropagated() {
+        if (propagated.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<List<String>> out = new ArrayList<>(propagated);
+        propagated.clear();
+        return out;
+    }
 
     /** Reply errors, raised inside commands and turned into -ERR replies. */
     static final class CommandError extends RuntimeException {
@@ -28,7 +112,8 @@ public final class CommandHandler {
 
     /** Commands that can modify the keyspace and so are written to the AOF. */
     private static final Set<String> WRITE_COMMANDS = Set.of("set", "del",
-        "flushall", "flushdb", "zadd", "zincrby", "zrem");
+        "flushall", "flushdb", "zadd", "zincrby", "zrem", "expire", "pexpire",
+        "expireat", "pexpireat", "persist");
 
     /**
      * @param name
@@ -45,36 +130,52 @@ public final class CommandHandler {
     /**
      * Builds the minimal command set that recreates the current keyspace, for
      * an AOF rewrite: one {@code SET} per string and one {@code ZADD} per
-     * {@value #REWRITE_ITEMS_PER_CMD} sorted-set members. Keys are emitted in
-     * sorted order so the output is deterministic. Scores are written so that
-     * they parse back to the identical double (including {@code -0}).
+     * {@value #REWRITE_ITEMS_PER_CMD} sorted-set members, followed by a
+     * {@code PEXPIREAT} for keys with a TTL. Already expired keys are left out.
+     * Keys are emitted in sorted order so the output is deterministic. Scores
+     * are written so that they parse back to the identical double (including
+     * {@code -0}).
      *
      * @return the commands, safe to use after the keyspace changes further
      */
     public List<List<String>> rewriteCommands() {
         List<String> keys = new ArrayList<>(db.keySet());
-        java.util.Collections.sort(keys);
+        Collections.sort(keys);
         List<List<String>> out = new ArrayList<>();
         for (String k : keys) {
-            Object v = db.get(k);
-            if (v instanceof String) {
-                out.add(java.util.Arrays.asList("SET", k, (String)v));
+            if (isExpired(k)) {
                 continue;
             }
-            List<SortedSet.Entry> es = ((SortedSet)v).range(0, -1, false);
-            for (int i = 0; i < es.size(); i += REWRITE_ITEMS_PER_CMD) {
-                int end = Math.min(es.size(), i + REWRITE_ITEMS_PER_CMD);
-                List<String> cmd = new ArrayList<>(2 + 2 * (end - i));
-                cmd.add("ZADD");
-                cmd.add(k);
-                for (SortedSet.Entry e : es.subList(i, end)) {
-                    cmd.add(exactScore(e.score));
-                    cmd.add(e.member);
-                }
-                out.add(cmd);
+            Object v = db.get(k);
+            Long when = expires.get(k);
+            if (v instanceof String) {
+                out.add(Arrays.asList("SET", k, (String)v));
+            }
+            else {
+                rewriteZset(out, k, (SortedSet)v);
+            }
+            if (when != null) {
+                out.add(Arrays.asList("PEXPIREAT", k, Long.toString(when)));
             }
         }
         return out;
+    }
+
+
+    private static void rewriteZset(List<List<String>> out, String k,
+        SortedSet z) {
+        List<SortedSet.Entry> es = z.range(0, -1, false);
+        for (int i = 0; i < es.size(); i += REWRITE_ITEMS_PER_CMD) {
+            int end = Math.min(es.size(), i + REWRITE_ITEMS_PER_CMD);
+            List<String> cmd = new ArrayList<>(2 + 2 * (end - i));
+            cmd.add("ZADD");
+            cmd.add(k);
+            for (SortedSet.Entry e : es.subList(i, end)) {
+                cmd.add(exactScore(e.score));
+                cmd.add(e.member);
+            }
+            out.add(cmd);
+        }
     }
 
 
@@ -99,8 +200,10 @@ public final class CommandHandler {
             return new Resp.Error("ERR empty command");
         }
         String cmd = args.get(0).toLowerCase(Locale.ROOT);
+        rewritten = null;
+        Object reply;
         try {
-            return dispatch(cmd, args);
+            reply = dispatch(cmd, args);
         }
         catch (CommandError e) {
             return new Resp.Error(e.getMessage());
@@ -110,6 +213,100 @@ public final class CommandHandler {
                 ? "ERR value is not a valid float"
                 : "ERR value is not an integer or out of range");
         }
+        if (propagate && WRITE_COMMANDS.contains(cmd) && rewritten != NONE) {
+            propagated.add(rewritten != null ? rewritten : args);
+        }
+        return reply;
+    }
+
+
+    /**
+     * One run of Redis's active expiry: repeatedly samples
+     * {@value #EXPIRE_SAMPLE} random keys with a TTL and deletes the expired
+     * ones, going again while more than a quarter of a sample had expired and
+     * the 25ms budget is not used up. Called about ten times a second.
+     *
+     * @return the number of keys deleted
+     */
+    public int activeExpireCycle() {
+        if (loading) {
+            return 0;
+        }
+        long start = System.nanoTime();
+        int deleted = 0;
+        while (expires.size() > 0) {
+            int sample = Math.min(EXPIRE_SAMPLE, expires.size());
+            int hit = 0;
+            if (sample == expires.size()) {
+                // few enough to check them all (random picks could miss one)
+                for (String k : expires.keys()) {
+                    hit += expireIfNeeded(k) ? 1 : 0;
+                }
+                deleted += hit;
+                break;
+            }
+            for (int i = 0; i < sample; i++) {
+                hit += expireIfNeeded(expires.randomKey(rnd)) ? 1 : 0;
+            }
+            deleted += hit;
+            if (hit * 4 <= sample || System.nanoTime()
+                - start > EXPIRE_BUDGET_NANOS) {
+                break;
+            }
+        }
+        return deleted;
+    }
+
+
+    /** @return the number of keys that currently have a TTL */
+    public int volatileKeys() {
+        return expires.size();
+    }
+
+
+    private long now() {
+        return clock.getAsLong();
+    }
+
+
+    /** True if {@code key} has a TTL that has passed (never while loading). */
+    private boolean isExpired(String key) {
+        if (loading) {
+            return false;
+        }
+        Long when = expires.get(key);
+        return when != null && now() > when;
+    }
+
+
+    /** Deletes {@code key} if it has expired; @return true if it did. */
+    private boolean expireIfNeeded(String key) {
+        if (!isExpired(key)) {
+            return false;
+        }
+        db.remove(key);
+        expires.remove(key);
+        expiredKeys++;
+        if (propagate) {
+            propagated.add(Arrays.asList("DEL", key));
+        }
+        return true;
+    }
+
+
+    /** The value of {@code key}, or null if absent or expired (lazy expiry). */
+    private Object lookup(String key) {
+        Object v = db.get(key);
+        if (v != null && expireIfNeeded(key)) {
+            return null;
+        }
+        return v;
+    }
+
+
+    private boolean removeKey(String key) {
+        expires.remove(key);
+        return db.remove(key) != null;
     }
 
 
@@ -141,23 +338,25 @@ public final class CommandHandler {
                 return Resp.OK;
             case "info":
                 return "# Server\r\nredis_version:7.0.0-skipdb\r\nskipdb_version:0.1.0\r\n"
-                    + "# Keyspace\r\ndb0:keys=" + db.size() + "\r\n";
+                    + "# Stats\r\nexpired_keys:" + expiredKeys + "\r\n"
+                    + "# Keyspace\r\ndb0:keys=" + db.size() + ",expires="
+                    + expires.size() + "\r\n";
             case "dbsize":
                 arity(cmd, a, 1, 1);
                 return (long)db.size();
             case "flushall":
             case "flushdb":
                 db.clear();
+                expires.clear();
                 return Resp.OK;
 
             // ---- keys / strings ----
             case "set":
-                arity(cmd, a, 3, 3);
-                db.put(a.get(1), a.get(2));
-                return Resp.OK;
+                arity(cmd, a, 3, -1);
+                return set(a);
             case "get": {
                 arity(cmd, a, 2, 2);
-                Object v = db.get(a.get(1));
+                Object v = lookup(a.get(1));
                 if (v != null && !(v instanceof String)) {
                     throw new CommandError(WRONGTYPE);
                 }
@@ -167,7 +366,7 @@ public final class CommandHandler {
                 arity(cmd, a, 2, -1);
                 long n = 0;
                 for (String k : a.subList(1, a.size())) {
-                    n += db.remove(k) != null ? 1 : 0;
+                    n += lookup(k) != null && removeKey(k) ? 1 : 0;
                 }
                 return n;
             }
@@ -175,13 +374,13 @@ public final class CommandHandler {
                 arity(cmd, a, 2, -1);
                 long n = 0;
                 for (String k : a.subList(1, a.size())) {
-                    n += db.containsKey(k) ? 1 : 0;
+                    n += lookup(k) != null ? 1 : 0;
                 }
                 return n;
             }
             case "type": {
                 arity(cmd, a, 2, 2);
-                Object v = db.get(a.get(1));
+                Object v = lookup(a.get(1));
                 return new Resp.Simple(v == null ? "none"
                     : v instanceof SortedSet ? "zset" : "string");
             }
@@ -190,11 +389,42 @@ public final class CommandHandler {
                 Pattern p = globToRegex(a.get(1));
                 List<Object> out = new ArrayList<>();
                 for (String k : db.keySet()) {
-                    if (p.matcher(k).matches()) {
+                    if (p.matcher(k).matches() && !isExpired(k)) {
                         out.add(k);
                     }
                 }
                 return out;
+            }
+
+            // ---- expiry ----
+            case "expire":
+            case "pexpire":
+            case "expireat":
+            case "pexpireat":
+                arity(cmd, a, 3, -1);
+                return expire(cmd, a);
+            case "ttl":
+            case "pttl":
+            case "expiretime":
+            case "pexpiretime": {
+                arity(cmd, a, 2, 2);
+                if (lookup(a.get(1)) == null) {
+                    return -2L;
+                }
+                Long when = expires.get(a.get(1));
+                if (when == null) {
+                    return -1L;
+                }
+                long t = cmd.endsWith("time") ? when : Math.max(0, when - now());
+                return cmd.startsWith("p") ? t : (t + 500) / 1000;
+            }
+            case "persist": {
+                arity(cmd, a, 2, 2);
+                if (lookup(a.get(1)) == null || !expires.remove(a.get(1))) {
+                    rewritten = NONE;
+                    return 0L;
+                }
+                return 1L;
             }
 
             // ---- sorted sets ----
@@ -246,7 +476,7 @@ public final class CommandHandler {
                         n += z.remove(m) ? 1 : 0;
                     }
                     if (z.size() == 0) {
-                        db.remove(a.get(1));
+                        removeKey(a.get(1));
                     }
                 }
                 return n;
@@ -329,8 +559,164 @@ public final class CommandHandler {
     }
 
 
+    /** SET key value [NX|XX] [GET] [EX s|PX ms|EXAT s|PXAT ms|KEEPTTL] */
+    private Object set(List<String> a) {
+        String key = a.get(1);
+        boolean nx = false;
+        boolean xx = false;
+        boolean get = false;
+        boolean keepTtl = false;
+        String unit = null; // ex, px, exat or pxat
+        String amount = null;
+        for (int i = 3; i < a.size(); i++) {
+            String opt = a.get(i).toLowerCase(Locale.ROOT);
+            switch (opt) {
+                case "nx":
+                    nx = true;
+                    break;
+                case "xx":
+                    xx = true;
+                    break;
+                case "get":
+                    get = true;
+                    break;
+                case "keepttl":
+                    keepTtl = true;
+                    break;
+                case "ex":
+                case "px":
+                case "exat":
+                case "pxat":
+                    if (unit != null || i + 1 >= a.size()) {
+                        throw new CommandError("ERR syntax error");
+                    }
+                    unit = opt;
+                    amount = a.get(++i);
+                    break;
+                default:
+                    throw new CommandError("ERR syntax error");
+            }
+        }
+        if ((nx && xx) || (keepTtl && unit != null)) {
+            throw new CommandError("ERR syntax error");
+        }
+        Long when = null;
+        if (unit != null) {
+            long n = Long.parseLong(amount);
+            boolean secs = unit.startsWith("e");
+            if (n <= 0 || (secs && n > Long.MAX_VALUE / 1000)) {
+                throw new CommandError(
+                    "ERR invalid expire time in 'set' command");
+            }
+            long ms = secs ? n * 1000 : n;
+            if (!unit.endsWith("at")) {
+                if (ms > Long.MAX_VALUE - now()) {
+                    throw new CommandError(
+                        "ERR invalid expire time in 'set' command");
+                }
+                ms += now();
+            }
+            when = ms;
+        }
+        Object old = lookup(key);
+        if (get && old != null && !(old instanceof String)) {
+            throw new CommandError(WRONGTYPE);
+        }
+        if ((nx && old != null) || (xx && old == null)) {
+            rewritten = NONE;
+            return get ? old : null;
+        }
+        db.put(key, a.get(2));
+        List<String> aof = new ArrayList<>(Arrays.asList("SET", key, a.get(2)));
+        if (when != null) {
+            if (when <= now() && !loading) {
+                removeKey(key); // already in the past, like Redis 7
+                rewritten = Arrays.asList("DEL", key);
+                return get ? old : Resp.OK;
+            }
+            expires.set(key, when);
+            aof.add("PXAT");
+            aof.add(Long.toString(when));
+        }
+        else if (keepTtl) {
+            aof.add("KEEPTTL");
+        }
+        else {
+            expires.remove(key);
+        }
+        rewritten = aof;
+        return get ? old : Resp.OK;
+    }
+
+
+    /** EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT key time [NX|XX|GT|LT] */
+    private Object expire(String cmd, List<String> a) {
+        long n = Long.parseLong(a.get(2));
+        boolean nx = false;
+        boolean xx = false;
+        boolean gt = false;
+        boolean lt = false;
+        for (String opt : a.subList(3, a.size())) {
+            switch (opt.toLowerCase(Locale.ROOT)) {
+                case "nx":
+                    nx = true;
+                    break;
+                case "xx":
+                    xx = true;
+                    break;
+                case "gt":
+                    gt = true;
+                    break;
+                case "lt":
+                    lt = true;
+                    break;
+                default:
+                    throw new CommandError("ERR Unsupported option " + opt);
+            }
+        }
+        if (nx && (xx || gt || lt)) {
+            throw new CommandError(
+                "ERR NX and XX, GT or LT options at the same time are not compatible");
+        }
+        if (gt && lt) {
+            throw new CommandError(
+                "ERR GT and LT options at the same time are not compatible");
+        }
+        long when;
+        try {
+            when = cmd.startsWith("p") ? n : Math.multiplyExact(n, 1000L);
+            if (!cmd.endsWith("at")) {
+                when = Math.addExact(when, now());
+            }
+        }
+        catch (ArithmeticException e) {
+            throw new CommandError("ERR invalid expire time in '" + cmd
+                + "' command");
+        }
+        String key = a.get(1);
+        rewritten = NONE;
+        if (lookup(key) == null) {
+            return 0L;
+        }
+        Long cur = expires.get(key);
+        // a key without a TTL counts as an infinite TTL for GT and LT
+        if ((nx && cur != null) || (xx && cur == null) || (gt && (cur == null
+            || when <= cur)) || (lt && cur != null && when >= cur)) {
+            return 0L;
+        }
+        if (when <= now() && !loading) {
+            removeKey(key);
+            rewritten = Arrays.asList("DEL", key);
+            return 1L;
+        }
+        expires.set(key, when);
+        rewritten = Arrays.asList("PEXPIREAT", key, Long.toString(when));
+        return 1L;
+    }
+
+
     private SortedSet zset(String key) {
-        Object v = db.get(key);
+        Object v = lookup(key);
         if (v != null && !(v instanceof SortedSet)) {
             throw new CommandError(WRONGTYPE);
         }

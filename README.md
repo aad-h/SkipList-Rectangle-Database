@@ -15,12 +15,28 @@ java -cp target/classes skipdb.SkipDBServer 6380
 redis-cli -p 6380 ZADD board 100 alice 85 bob 92 carol
 redis-cli -p 6380 ZREVRANGE board 0 2 WITHSCORES   # leaderboard top 3
 redis-cli -p 6380 ZREVRANK board carol              # -> 1
+redis-cli -p 6380 SET session:42 alice EX 1800 NX   # expires in 30 min
+redis-cli -p 6380 TTL session:42                    # -> 1800
 ```
 
+**Expiry:** any key can carry a TTL (`EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`
+with Redis 7's `NX XX GT LT`, `TTL PTTL EXPIRETIME PEXPIRETIME PERSIST`, and
+`SET ... EX|PX|EXAT|PXAT|KEEPTTL` alongside `NX XX GET`). As in Redis, expired
+keys are removed two ways: *lazily*, when a command touches one, and
+*actively*, by a cron thread that ten times a second samples 20 random keys
+with a TTL (an O(1) dense-array index), deletes the expired ones, and goes
+again while more than 25% of a sample had expired (25 ms budget). Writes keep
+a key's TTL; `SET` without `KEEPTTL`, `DEL` and emptying a sorted set drop it.
+The clock is injectable, so tests drive time explicitly.
+
 **Persistence:** start with `--aof <path>` to keep an append-only file. Every
-successful write (`SET DEL FLUSHALL ZADD ZINCRBY ZREM`) is appended as the RESP
-command a client would send and flushed before the reply goes out; the file is
-replayed on startup, so data survives a restart or `kill`.
+successful write (`SET DEL FLUSHALL ZADD ZINCRBY ZREM EXPIRE ...`) is appended
+as a RESP command and flushed before the reply goes out; the file is replayed
+on startup, so data survives a restart or `kill`. Like Redis, relative expiry
+is logged as an absolute time (`EXPIRE k 10` → `PEXPIREAT k <ms>`, `SET ... EX`
+→ `SET ... PXAT`), and every key that expires is logged as an explicit `DEL`.
+Keys never expire *during* replay, so loading the same file a minute or a week
+later yields the same keyspace, after which stale keys are reclaimed.
 
 ```bash
 java -cp target/classes skipdb.SkipDBServer 6380 --aof appendonly.aof --appendfsync everysec
@@ -39,7 +55,8 @@ and `no` leaves it to the OS.
 
 `BGREWRITEAOF` replaces the log with the minimal command set for the current
 data (one `SET` per string, one `ZADD` per 64 members, scores written so they
-parse back bit-for-bit). The snapshot is taken under the command lock, then
+parse back bit-for-bit, a `PEXPIREAT` per key with a TTL, expired keys
+skipped). The snapshot is taken under the command lock, then
 written to a temp file on a background thread while new writes go to the old
 file *and* a rewrite buffer; the buffer is appended, the temp file fsynced and
 atomically renamed over the old one. A failed rewrite leaves the old file in
@@ -64,11 +81,14 @@ r.zrangebyscore("board", 90, "+inf", withscores=True)
 - `SkipDBServer`: thread-per-client TCP server; commands execute under one
   lock, so there are no data races (Redis's single-threaded execution model).
   `MULTI`/`EXEC`/`DISCARD` run queued commands as one atomic batch.
+- `Expires`: key → expiry-time index with O(1) random sampling for the
+  active-expiry sweep.
 - `Aof`: append-only file writer with fsync policies, crash-tolerant
   replayer, and background rewrite (compaction).
 
 **Commands:** `ZADD ZINCRBY ZSCORE ZCARD ZREM ZRANK ZREVRANK ZRANGE ZREVRANGE
 ZRANGEBYSCORE ZCOUNT`, `SET GET DEL EXISTS TYPE KEYS DBSIZE FLUSHALL`,
+`EXPIRE PEXPIRE EXPIREAT PEXPIREAT TTL PTTL EXPIRETIME PEXPIRETIME PERSIST`,
 `PING ECHO INFO HELLO CLIENT SELECT COMMAND`, `MULTI EXEC DISCARD`,
 `BGREWRITEAOF`, `QUIT`.
 
@@ -82,7 +102,9 @@ socket tests for pipelining, transactions, protocol errors and 8
 concurrent clients, and AOF tests (restart round-trip, a torn write cut at
 every byte offset, unfinished transactions, corrupt files, fsync counts per
 policy, rewrites that race with concurrent writes, failed rewrites, exact
-score round-trips including `-0` and `inf`). Also verified against real `redis-cli`, `redis-benchmark`
+score round-trips including `-0` and `inf`), and expiry tests on a fake clock
+(TTL rounding, the exact deadline, option conflicts, lazy and active expiry,
+and an AOF replayed at three different later times giving the same data). Also verified against real `redis-cli`, `redis-benchmark`
 and `redis-py`.
 
 See [ROADMAP.md](ROADMAP.md) for persistence, expiry, benchmarks and the demo.

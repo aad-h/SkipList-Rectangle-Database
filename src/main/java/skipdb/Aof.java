@@ -129,13 +129,26 @@ public final class Aof implements AutoCloseable {
 
     /**
      * Replays the file into {@code handler}, truncating a partial trailing
-     * command, then opens the file for appending.
+     * command, then opens the file for appending. The handler is in
+     * {@link CommandHandler#setLoading loading} mode meanwhile, so keys whose
+     * TTL has passed are restored and then reclaimed, not dropped mid-replay.
      *
      * @return the number of commands applied (MULTI/EXEC markers excluded)
      * @throws IOException
      *             if the file cannot be read or is corrupt
      */
     public long load(CommandHandler handler) throws IOException {
+        handler.setLoading(true);
+        try {
+            return replay(handler);
+        }
+        finally {
+            handler.setLoading(false);
+        }
+    }
+
+
+    private long replay(CommandHandler handler) throws IOException {
         long applied = 0;
         if (Files.exists(path)) {
             long validBytes = 0;

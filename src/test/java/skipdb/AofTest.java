@@ -480,4 +480,34 @@ public class AofTest {
             assertEquals("v", call(s, "GET", "k"));
         }
     }
+
+
+    @Test
+    public void serverLogsAbsoluteExpiryAndExpiredDeletes() throws Exception {
+        try (SkipDBServer srv = new SkipDBServer(0, file, Aof.Fsync.ALWAYS)
+            .start(); Socket s = new Socket("localhost", srv.port())) {
+            s.setSoTimeout(5000);
+            assertEquals("+OK", call(s, "SET", "long", "v", "EX", "3600"));
+            assertEquals("+OK", call(s, "SET", "brief", "v", "PX", "100"));
+            assertEquals(":0", call(s, "EXPIRE", "missing", "10"));
+            long deadline = System.currentTimeMillis() + 3000;
+            while (!read(file).contains("DEL") && System
+                .currentTimeMillis() < deadline) {
+                Thread.sleep(20);
+            }
+        }
+        String log = read(file);
+        assertTrue(log, log.contains("PXAT"));
+        assertTrue("relative EX must not be logged", !log.contains("$2\r\nEX"));
+        assertTrue("no-op EXPIRE must not be logged", !log.contains("missing"));
+        assertTrue("active expiry must log a DEL", log.contains(
+            "*2\r\n$3\r\nDEL\r\n$5\r\nbrief"));
+        try (SkipDBServer srv = new SkipDBServer(0, file).start();
+            Socket s = new Socket("localhost", srv.port())) {
+            s.setSoTimeout(5000);
+            assertEquals(":1", call(s, "DBSIZE"));
+            long ttl = Long.parseLong(call(s, "TTL", "long").substring(1));
+            assertTrue(String.valueOf(ttl), ttl > 3590 && ttl <= 3600);
+        }
+    }
 }
