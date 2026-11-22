@@ -26,8 +26,8 @@ Target resume line:
 - [ ] RESP3 (`HELLO 3`): redis-py 8 defaults to it; needs map/double/null types
 - [x] Append-only file (AOF) with `everysec` / `always` fsync, replay on startup
 - [x] AOF rewrite/compaction
-- [ ] `EXPIRE` / `TTL` with lazy + periodic eviction
-- [ ] `ZADD` flags: NX, XX, GT, LT, CH, INCR
+- [x] `EXPIRE` / `TTL` with lazy + periodic eviction
+- [x] `ZADD` flags: NX, XX, GT, LT, CH, INCR
 
 ## Phase 3: Performance
 - [ ] JMH benchmarks: RankedSkipList vs `TreeMap` vs `ConcurrentSkipListMap`
@@ -51,7 +51,7 @@ README if user-visible. Tick the box in the same commit that finishes it.
 - [x] 1. AOF persistence: append every write command to `appendonly.aof`, replay it on startup (`--aof <path>` flag)
 - [x] 2. AOF fsync policy (`always` / `everysec` / `no`) + `BGREWRITEAOF` compaction that rewrites the minimal command set
 - [x] 3. Key expiry: `EXPIRE`, `PEXPIRE`, `TTL`, `PTTL`, `PERSIST`, `SET ... EX/PX`; lazy expiry on access + periodic sampling sweep; injectable clock for tests
-- [ ] 4. `ZADD` flags: `NX`, `XX`, `GT`, `LT`, `CH`, `INCR` with Redis's exact compatibility rules and errors
+- [x] 4. `ZADD` flags: `NX`, `XX`, `GT`, `LT`, `CH`, `INCR` with Redis's exact compatibility rules and errors
 - [ ] 5. More sorted-set commands: `ZPOPMIN`, `ZPOPMAX`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZMSCORE`, `ZRANDMEMBER`
 - [ ] 6. RESP3 support (`HELLO 3`): maps, doubles, nulls, per-connection protocol so redis-py 8 works without `protocol=2`
 - [ ] 7. Benchmark harness (`skipdb.bench`): RankedSkipList vs `TreeMap` vs `ConcurrentSkipListMap` for insert/rank/range at 10k–1M elements, warmup + repeated trials, CSV output, results table in README

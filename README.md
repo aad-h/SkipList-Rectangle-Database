@@ -15,6 +15,7 @@ java -cp target/classes skipdb.SkipDBServer 6380
 redis-cli -p 6380 ZADD board 100 alice 85 bob 92 carol
 redis-cli -p 6380 ZREVRANGE board 0 2 WITHSCORES   # leaderboard top 3
 redis-cli -p 6380 ZREVRANK board carol              # -> 1
+redis-cli -p 6380 ZADD board GT CH 95 bob 90 alice  # -> 1 (only raises scores)
 redis-cli -p 6380 SET session:42 alice EX 1800 NX   # expires in 30 min
 redis-cli -p 6380 TTL session:42                    # -> 1800
 ```
@@ -86,7 +87,8 @@ r.zrangebyscore("board", 90, "+inf", withscores=True)
 - `Aof`: append-only file writer with fsync policies, crash-tolerant
   replayer, and background rewrite (compaction).
 
-**Commands:** `ZADD ZINCRBY ZSCORE ZCARD ZREM ZRANK ZREVRANK ZRANGE ZREVRANGE
+**Commands:** `ZADD` (with `NX XX GT LT CH INCR`, replies and errors matching
+Redis 7 byte-for-byte), `ZINCRBY ZSCORE ZCARD ZREM ZRANK ZREVRANK ZRANGE ZREVRANGE
 ZRANGEBYSCORE ZCOUNT`, `SET GET DEL EXISTS TYPE KEYS DBSIZE FLUSHALL`,
 `EXPIRE PEXPIRE EXPIREAT PEXPIREAT TTL PTTL EXPIRETIME PEXPIRETIME PERSIST`,
 `PING ECHO INFO HELLO CLIENT SELECT COMMAND`, `MULTI EXEC DISCARD`,

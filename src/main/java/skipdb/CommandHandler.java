@@ -428,23 +428,9 @@ public final class CommandHandler {
             }
 
             // ---- sorted sets ----
-            case "zadd": {
+            case "zadd":
                 arity(cmd, a, 4, -1);
-                if ((a.size() - 2) % 2 != 0) {
-                    throw new CommandError("ERR syntax error");
-                }
-                // parse everything first so a bad score changes nothing
-                List<Double> scores = new ArrayList<>();
-                for (int i = 2; i < a.size(); i += 2) {
-                    scores.add(SortedSet.parseScore(a.get(i)));
-                }
-                SortedSet z = zsetOrCreate(a.get(1));
-                long added = 0;
-                for (int i = 2; i < a.size(); i += 2) {
-                    added += z.add(a.get(i + 1), scores.get((i - 2) / 2)) ? 1 : 0;
-                }
-                return added;
-            }
+                return zadd(a);
             case "zincrby": {
                 arity(cmd, a, 4, 4);
                 double d = SortedSet.parseScore(a.get(2));
@@ -712,6 +698,124 @@ public final class CommandHandler {
         expires.set(key, when);
         rewritten = Arrays.asList("PEXPIREAT", key, Long.toString(when));
         return 1L;
+    }
+
+
+    /**
+     * {@code ZADD key [NX|XX] [GT|LT] [CH] [INCR] score member [score member
+     * ...]}, following Redis 7's {@code zaddGenericCommand}: options are
+     * checked before any score is parsed, every score is parsed before
+     * anything changes, {@code XX} never creates the key, and {@code GT}/
+     * {@code LT} only restrict updates (new members are always added).
+     *
+     * @return added (or added + changed with CH) members; with INCR the new
+     *         score, or null if the update was skipped
+     */
+    private Object zadd(List<String> a) {
+        boolean nx = false;
+        boolean xx = false;
+        boolean gt = false;
+        boolean lt = false;
+        boolean ch = false;
+        boolean incr = false;
+        int i = 2;
+        for (; i < a.size(); i++) {
+            String opt = a.get(i).toLowerCase(Locale.ROOT);
+            if (opt.equals("nx")) {
+                nx = true;
+            }
+            else if (opt.equals("xx")) {
+                xx = true;
+            }
+            else if (opt.equals("gt")) {
+                gt = true;
+            }
+            else if (opt.equals("lt")) {
+                lt = true;
+            }
+            else if (opt.equals("ch")) {
+                ch = true;
+            }
+            else if (opt.equals("incr")) {
+                incr = true;
+            }
+            else {
+                break;
+            }
+        }
+        int elements = a.size() - i;
+        if (elements == 0 || elements % 2 != 0) {
+            throw new CommandError("ERR syntax error");
+        }
+        if (incr && elements > 2) {
+            throw new CommandError(
+                "ERR INCR option supports a single increment-element pair");
+        }
+        if (nx && xx) {
+            throw new CommandError(
+                "ERR XX and NX options at the same time are not compatible");
+        }
+        if ((gt && nx) || (lt && nx) || (gt && lt)) {
+            throw new CommandError("ERR GT, LT, and/or NX options at the same "
+                + "time are not compatible");
+        }
+        // parse everything first so a bad score changes nothing
+        double[] scores = new double[elements / 2];
+        for (int j = 0; j < scores.length; j++) {
+            scores[j] = SortedSet.parseScore(a.get(i + 2 * j));
+        }
+        String key = a.get(1);
+        SortedSet z = zset(key);
+        if (z == null && xx) {
+            rewritten = NONE;
+            return incr ? null : (Object)0L;
+        }
+        if (z == null) {
+            z = zsetOrCreate(key);
+        }
+        long added = 0;
+        long updated = 0;
+        boolean processed = false;
+        double score = 0;
+        for (int j = 0; j < scores.length; j++) {
+            String member = a.get(i + 2 * j + 1);
+            score = scores[j];
+            Double cur = z.score(member);
+            if (cur == null) {
+                if (xx) {
+                    continue;
+                }
+                z.add(member, score);
+                added++;
+                processed = true;
+                continue;
+            }
+            if (nx) {
+                continue;
+            }
+            if (incr) {
+                score += cur;
+                if (Double.isNaN(score)) {
+                    throw new CommandError(
+                        "ERR resulting score is not a number (NaN)");
+                }
+            }
+            if ((lt && score >= cur) || (gt && score <= cur)) {
+                continue;
+            }
+            processed = true;
+            if (score != cur) {
+                z.add(member, score);
+                updated++;
+            }
+        }
+        if (added + updated == 0) {
+            rewritten = NONE;
+        }
+        if (incr) {
+            return processed ? fmt(score) : null;
+        }
+        return ch ? added + updated : added;
     }
 
 
