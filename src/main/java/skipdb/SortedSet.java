@@ -214,6 +214,61 @@ public final class SortedSet {
     }
 
 
+    /**
+     * Removes and returns up to {@code count} members with the lowest scores
+     * (or highest, if {@code max}), in pop order.
+     */
+    public List<Entry> pop(long count, boolean max) {
+        List<Entry> out = new ArrayList<>();
+        while (count-- > 0 && size() > 0) {
+            RankedSkipList.Node n = max ? list.last() : list.first();
+            out.add(new Entry(n.member(), n.score()));
+            remove(n.member());
+        }
+        return out;
+    }
+
+
+    /**
+     * Removes the members in a rank range, with the same index rules as
+     * {@link #range}.
+     *
+     * @return the number removed
+     */
+    public int removeRangeByRank(long start, long stop) {
+        return removeAll(range(start, stop, false));
+    }
+
+
+    /**
+     * Removes the members whose score lies within the bounds.
+     *
+     * @return the number removed
+     */
+    public int removeRangeByScore(Bound min, Bound max) {
+        return removeAll(rangeByScore(min, max, 0, -1));
+    }
+
+
+    private int removeAll(List<Entry> es) {
+        for (Entry e : es) {
+            remove(e.member);
+        }
+        return es.size();
+    }
+
+
+    /**
+     * @param rank
+     *            0-based ascending rank
+     * @return the entry at that rank, or null if out of range
+     */
+    public Entry at(int rank) {
+        RankedSkipList.Node n = list.byRank(rank + 1);
+        return n == null ? null : new Entry(n.member(), n.score());
+    }
+
+
     private static boolean withinMax(double score, Bound max) {
         return max.exclusive ? score < max.value : score <= max.value;
     }

@@ -113,7 +113,8 @@ public final class CommandHandler {
     /** Commands that can modify the keyspace and so are written to the AOF. */
     private static final Set<String> WRITE_COMMANDS = Set.of("set", "del",
         "flushall", "flushdb", "zadd", "zincrby", "zrem", "expire", "pexpire",
-        "expireat", "pexpireat", "persist");
+        "expireat", "pexpireat", "persist", "zpopmin", "zpopmax",
+        "zremrangebyrank", "zremrangebyscore");
 
     /**
      * @param name
@@ -478,8 +479,8 @@ public final class CommandHandler {
             case "zrevrange": {
                 arity(cmd, a, 4, 5);
                 boolean withScores = flag(a, 4, "withscores");
-                long start = Long.parseLong(a.get(2));
-                long stop = Long.parseLong(a.get(3));
+                long start = parseLong(a.get(2));
+                long stop = parseLong(a.get(3));
                 SortedSet z = zset(a.get(1));
                 return z == null ? new ArrayList<>()
                     : entries(z.range(start, stop, cmd.equals("zrevrange")),
@@ -487,8 +488,8 @@ public final class CommandHandler {
             }
             case "zrangebyscore": {
                 arity(cmd, a, 4, 8);
-                SortedSet.Bound min = SortedSet.Bound.parse(a.get(2));
-                SortedSet.Bound max = SortedSet.Bound.parse(a.get(3));
+                SortedSet.Bound min = parseBound(a.get(2));
+                SortedSet.Bound max = parseBound(a.get(3));
                 boolean withScores = false;
                 long offset = 0;
                 long limit = -1;
@@ -498,8 +499,8 @@ public final class CommandHandler {
                         withScores = true;
                     }
                     else if (opt.equals("limit") && i + 2 < a.size()) {
-                        offset = Long.parseLong(a.get(++i));
-                        limit = Long.parseLong(a.get(++i));
+                        offset = parseLong(a.get(++i));
+                        limit = parseLong(a.get(++i));
                     }
                     else {
                         throw new CommandError("ERR syntax error");
@@ -515,11 +516,50 @@ public final class CommandHandler {
             }
             case "zcount": {
                 arity(cmd, a, 4, 4);
-                SortedSet.Bound min = SortedSet.Bound.parse(a.get(2));
-                SortedSet.Bound max = SortedSet.Bound.parse(a.get(3));
+                SortedSet.Bound min = parseBound(a.get(2));
+                SortedSet.Bound max = parseBound(a.get(3));
                 SortedSet z = zset(a.get(1));
                 return (long)(z == null ? 0 : z.count(min, max));
             }
+            case "zpopmin":
+            case "zpopmax":
+                arity(cmd, a, 2, -1);
+                return zpop(cmd, a);
+            case "zremrangebyrank":
+            case "zremrangebyscore": {
+                arity(cmd, a, 4, 4);
+                int removed = 0;
+                if (cmd.equals("zremrangebyrank")) {
+                    long start = parseLong(a.get(2));
+                    long stop = parseLong(a.get(3));
+                    SortedSet z = zset(a.get(1));
+                    removed = z == null ? 0 : z.removeRangeByRank(start, stop);
+                }
+                else {
+                    SortedSet.Bound min = parseBound(a.get(2));
+                    SortedSet.Bound max = parseBound(a.get(3));
+                    SortedSet z = zset(a.get(1));
+                    removed = z == null ? 0 : z.removeRangeByScore(min, max);
+                }
+                dropIfEmpty(a.get(1));
+                if (removed == 0) {
+                    rewritten = NONE;
+                }
+                return (long)removed;
+            }
+            case "zmscore": {
+                arity(cmd, a, 3, -1);
+                SortedSet z = zset(a.get(1));
+                List<Object> out = new ArrayList<>(a.size() - 2);
+                for (String m : a.subList(2, a.size())) {
+                    Double s = z == null ? null : z.score(m);
+                    out.add(s == null ? null : fmt(s));
+                }
+                return out;
+            }
+            case "zrandmember":
+                arity(cmd, a, 2, -1);
+                return zrandmember(a);
             default:
                 throw new CommandError("ERR unknown command '" + cmd + "'");
         }
@@ -816,6 +856,142 @@ public final class CommandHandler {
             return processed ? fmt(score) : null;
         }
         return ch ? added + updated : added;
+    }
+
+
+    /**
+     * {@code ZPOPMIN|ZPOPMAX key [count]}. Without a count the reply is one
+     * member and score (or an empty array); the AOF gets a {@code ZREM} of the
+     * members actually popped.
+     */
+    private Object zpop(String cmd, List<String> a) {
+        if (a.size() > 3) {
+            throw new CommandError("ERR syntax error");
+        }
+        long count = 1;
+        if (a.size() == 3) {
+            try {
+                count = Long.parseLong(a.get(2));
+            }
+            catch (NumberFormatException e) {
+                count = -1; // Redis reports a non-integer the same way
+            }
+            if (count < 0) {
+                throw new CommandError(
+                    "ERR value is out of range, must be positive");
+            }
+        }
+        String key = a.get(1);
+        SortedSet z = zset(key);
+        List<SortedSet.Entry> es = z == null ? new ArrayList<>()
+            : z.pop(count, cmd.equals("zpopmax"));
+        dropIfEmpty(key);
+        if (es.isEmpty()) {
+            rewritten = NONE;
+        }
+        else {
+            List<String> aof = new ArrayList<>(2 + es.size());
+            aof.add("ZREM");
+            aof.add(key);
+            for (SortedSet.Entry e : es) {
+                aof.add(e.member);
+            }
+            rewritten = aof;
+        }
+        return entries(es, true);
+    }
+
+
+    /**
+     * {@code ZRANDMEMBER key [count [WITHSCORES]]}. A positive count returns
+     * distinct members (the whole set if count is at least its size); a
+     * negative count returns exactly |count| members, possibly repeated.
+     */
+    private Object zrandmember(List<String> a) {
+        if (a.size() > 4 || (a.size() == 4 && !a.get(3).equalsIgnoreCase(
+            "withscores"))) {
+            throw new CommandError("ERR syntax error");
+        }
+        if (a.size() == 2) {
+            SortedSet z = zset(a.get(1));
+            return z == null ? null : z.at(rnd.nextInt(z.size())).member;
+        }
+        long count = parseLong(a.get(2));
+        if (count == Long.MIN_VALUE) {
+            throw new CommandError("ERR value is out of range, value must "
+                + "between -9223372036854775807 and 9223372036854775807");
+        }
+        boolean withScores = a.size() == 4;
+        if ((withScores && Math.abs(count)
+            > Long.MAX_VALUE / 2)) {
+            throw new CommandError("ERR value is out of range");
+        }
+        SortedSet z = zset(a.get(1));
+        if (z == null || count == 0) {
+            return new ArrayList<>();
+        }
+        int n = z.size();
+        List<SortedSet.Entry> out = new ArrayList<>();
+        if (count < 0) {
+            if (-count > Integer.MAX_VALUE / 2) {
+                throw new CommandError("ERR value is out of range");
+            }
+            for (long i = 0; i < -count; i++) {
+                out.add(z.at(rnd.nextInt(n)));
+            }
+        }
+        else if (count >= n) {
+            out = z.range(0, -1, false);
+        }
+        else if (count * 3 > n) {
+            // dense: shuffle all ranks, keep the first count
+            List<SortedSet.Entry> all = z.range(0, -1, false);
+            Collections.shuffle(all, rnd);
+            out = all.subList(0, (int)count);
+        }
+        else {
+            // sparse: sample distinct ranks
+            Set<Integer> seen = new java.util.HashSet<>();
+            while (out.size() < count) {
+                int r = rnd.nextInt(n);
+                if (seen.add(r)) {
+                    out.add(z.at(r));
+                }
+            }
+        }
+        return entries(out, withScores);
+    }
+
+
+    /** Deletes {@code key} if it holds an empty sorted set. */
+    private void dropIfEmpty(String key) {
+        Object v = db.get(key);
+        if (v instanceof SortedSet && ((SortedSet)v).size() == 0) {
+            removeKey(key);
+        }
+    }
+
+
+    /** Parses an integer argument with Redis's error message. */
+    private static long parseLong(String s) {
+        try {
+            return Long.parseLong(s);
+        }
+        catch (NumberFormatException e) {
+            throw new CommandError(
+                "ERR value is not an integer or out of range");
+        }
+    }
+
+
+    /** Parses a score range bound with Redis's error message. */
+    private static SortedSet.Bound parseBound(String s) {
+        try {
+            return SortedSet.Bound.parse(s);
+        }
+        catch (NumberFormatException e) {
+            throw new CommandError("ERR min or max is not a float");
+        }
     }
 
 
