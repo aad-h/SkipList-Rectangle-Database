@@ -25,7 +25,7 @@ public class ExpiryTest {
     private CommandHandler h;
 
     private Object run(String line) {
-        return h.execute(cmd(line));
+        return Resp.toResp2(h.execute(cmd(line)));
     }
 
 

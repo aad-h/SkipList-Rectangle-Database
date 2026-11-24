@@ -378,8 +378,8 @@ public class AofTest {
         try (Aof again = new Aof(file)) {
             again.load(replay);
         }
-        assertEquals(List.of("bob", "7", "alice", "500"), replay.execute(cmd(
-            "ZRANGE board 0 -1 WITHSCORES")));
+        assertEquals(List.of("bob", "7", "alice", "500"), Resp.toResp2(replay
+            .execute(cmd("ZRANGE board 0 -1 WITHSCORES"))));
         assertEquals("1", replay.execute(cmd("GET a")));
         assertEquals("2", replay.execute(cmd("GET b")));
         assertEquals("3", replay.execute(cmd("GET c")));

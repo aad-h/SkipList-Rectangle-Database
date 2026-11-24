@@ -64,11 +64,22 @@ atomically renamed over the old one. A failed rewrite leaves the old file in
 use. A second `BGREWRITEAOF` during a rewrite gets Redis's "already in
 progress" error. (Unlike Redis, `BGREWRITEAOF` requires `--aof`.)
 
+**RESP3:** every connection starts in RESP2 and can switch with `HELLO 3`
+(redis-py 8 does this by default; `redis-cli -3` too). Replies then use
+RESP3's native types exactly as Redis 7 sends them: scores are doubles
+(`,2.5`), `WITHSCORES` replies are arrays of `[member, score]` pairs
+(`ZPOPMIN key` without a count stays flat, like Redis), `HELLO` is a map,
+`INFO` a verbatim string and null is `_`. The protocol is per connection, so
+RESP2 and RESP3 clients can share a server. `HELLO` accepts `AUTH default
+<any>` and `SETNAME`, with Redis's `NOPROTO`/syntax errors; a failed `HELLO`
+leaves the protocol unchanged. Command handlers return protocol-neutral reply
+values and the encoder picks the wire form per connection.
+
 ```python
-import redis  # redis-py; use protocol=2 (SkipDB speaks RESP2)
-r = redis.Redis(port=6380, protocol=2, decode_responses=True)
-r.zincrby("board", 10, "bob")
-r.zrangebyscore("board", 90, "+inf", withscores=True)
+import redis  # redis-py 8: negotiates RESP3 automatically
+r = redis.Redis(port=6380, decode_responses=True)
+r.zincrby("board", 10, "bob")                         # -> 95.5 (a float)
+r.zrangebyscore("board", 90, "+inf", withscores=True)  # [('carol', 92.0), ...]
 ```
 
 **How it works**
@@ -78,7 +89,8 @@ r.zrangebyscore("board", 90, "+inf", withscores=True)
   Insert, delete, rank, select-by-rank and score lookups are all expected
   O(log n). This is the same design Redis uses for `ZSET`.
 - `SortedSet`: hash map (member → score, O(1) `ZSCORE`) + ranked skip list.
-- `Resp`: RESP2 parser/encoder, including inline commands and pipelining.
+- `Resp`: RESP parser and RESP2/RESP3 encoder (doubles, maps, nulls,
+  verbatim strings), including inline commands and pipelining.
 - `SkipDBServer`: thread-per-client TCP server; commands execute under one
   lock, so there are no data races (Redis's single-threaded execution model).
   `MULTI`/`EXEC`/`DISCARD` run queued commands as one atomic batch.
@@ -92,7 +104,7 @@ Redis 7 byte-for-byte), `ZINCRBY ZSCORE ZCARD ZREM ZRANK ZREVRANK ZRANGE ZREVRAN
 ZRANGEBYSCORE ZCOUNT ZPOPMIN ZPOPMAX ZREMRANGEBYRANK ZREMRANGEBYSCORE ZMSCORE
 ZRANDMEMBER` (ZPOPs reach the AOF as a deterministic `ZREM`), `SET GET DEL EXISTS TYPE KEYS DBSIZE FLUSHALL`,
 `EXPIRE PEXPIRE EXPIREAT PEXPIREAT TTL PTTL EXPIRETIME PEXPIRETIME PERSIST`,
-`PING ECHO INFO HELLO CLIENT SELECT COMMAND`, `MULTI EXEC DISCARD`,
+`PING ECHO INFO HELLO (2|3) CLIENT SELECT COMMAND`, `MULTI EXEC DISCARD`,
 `BGREWRITEAOF`, `QUIT`.
 
 **First numbers** (`redis-benchmark`, 20 clients, dev container; not a tuned
@@ -107,8 +119,11 @@ every byte offset, unfinished transactions, corrupt files, fsync counts per
 policy, rewrites that race with concurrent writes, failed rewrites, exact
 score round-trips including `-0` and `inf`), and expiry tests on a fake clock
 (TTL rounding, the exact deadline, option conflicts, lazy and active expiry,
-and an AOF replayed at three different later times giving the same data). Also verified against real `redis-cli`, `redis-benchmark`
-and `redis-py`.
+and an AOF replayed at three different later times giving the same data), and
+RESP3 tests (encoder bytes for every type, `HELLO` validation, one connection
+in RESP3 beside one in RESP2, transactions). RESP3 replies were diffed
+byte-for-byte against Redis 7.0.15. Also verified against real `redis-cli`,
+`redis-benchmark` and `redis-py` 8 (default RESP3).
 
 See [ROADMAP.md](ROADMAP.md) for persistence, expiry, benchmarks and the demo.
 

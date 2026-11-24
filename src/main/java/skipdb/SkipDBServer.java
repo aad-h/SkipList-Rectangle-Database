@@ -19,8 +19,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * TCP server speaking RESP2, so redis-cli and Redis client libraries can
- * connect. One thread per client; command execution is serialized on a single
+ * TCP server speaking RESP2 and RESP3, so redis-cli and Redis client libraries
+ * can connect. Each connection starts in RESP2 and may switch with
+ * {@code HELLO 3} (redis-py 8, Lettuce and others do on connect). One thread per client; command execution is serialized on a single
  * lock (Redis's model: no data races, no per-structure locking). MULTI/EXEC
  * transactions queue commands per connection and run them as one atomic batch.
  *
@@ -52,6 +53,17 @@ public final class SkipDBServer implements AutoCloseable {
         return t;
     });
     private final AtomicLong clients = new AtomicLong();
+    private final AtomicLong nextClientId = new AtomicLong();
+
+    /** Per-connection state that commands can change. */
+    private static final class Conn {
+        final long id;
+        int proto = 2;
+
+        Conn(long id) {
+            this.id = id;
+        }
+    }
     private volatile boolean running = true;
 
     /**
@@ -192,6 +204,7 @@ public final class SkipDBServer implements AutoCloseable {
         try (Socket s = socket;
             InputStream in = new BufferedInputStream(s.getInputStream());
             OutputStream out = new BufferedOutputStream(s.getOutputStream())) {
+            Conn conn = new Conn(nextClientId.incrementAndGet());
             // MULTI/EXEC state for this connection: null when not in a transaction
             List<List<String>> queued = null;
             while (true) {
@@ -242,7 +255,7 @@ public final class SkipDBServer implements AutoCloseable {
                         synchronized (handler) {
                             List<List<String>> writes = new ArrayList<>();
                             for (List<String> q : queued) {
-                                results.add(run(q));
+                                results.add(run(q, conn));
                                 writes.addAll(handler.drainPropagated());
                             }
                             if (aof != null) {
@@ -259,13 +272,13 @@ public final class SkipDBServer implements AutoCloseable {
                 }
                 else {
                     synchronized (handler) {
-                        reply = run(cmd);
+                        reply = run(cmd, conn);
                         if (aof != null) {
                             logToAof(handler.drainPropagated());
                         }
                     }
                 }
-                Resp.write(out, reply);
+                Resp.write(out, reply, conn.proto);
                 // only flush when no pipelined command is already waiting
                 if (in.available() == 0) {
                     out.flush();
@@ -283,9 +296,19 @@ public final class SkipDBServer implements AutoCloseable {
 
     /**
      * Executes one command; caller holds the handler lock. Server-level
-     * commands that need the AOF are handled here, the rest by the handler.
+     * commands that need the AOF or the connection are handled here, the
+     * rest by the handler.
      */
-    private Object run(List<String> cmd) {
+    private Object run(List<String> cmd, Conn conn) {
+        if (cmd.get(0).equalsIgnoreCase("hello")) {
+            try {
+                conn.proto = CommandHandler.helloProtocol(cmd, conn.proto);
+            }
+            catch (CommandHandler.CommandError e) {
+                return new Resp.Error(e.getMessage());
+            }
+            return CommandHandler.helloReply(conn.proto, conn.id);
+        }
         if (cmd.get(0).equalsIgnoreCase("bgrewriteaof")) {
             if (cmd.size() != 1) {
                 return new Resp.Error(

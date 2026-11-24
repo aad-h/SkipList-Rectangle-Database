@@ -12,13 +12,17 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * RESP2 (REdis Serialization Protocol) reader and writer.
+ * RESP (REdis Serialization Protocol) reader and writer, versions 2 and 3.
  *
  * <p>Requests are arrays of bulk strings ({@code *2\r\n$3\r\nGET\r\n$1\r\nk\r\n})
  * or inline commands ({@code GET k\r\n}, handy with telnet/nc). Replies are
  * written from plain Java values: String = bulk string, Long/Integer =
- * integer, List = array, null = null bulk, plus {@link Simple} and
- * {@link Error}.
+ * integer, List = array, null = null, plus {@link Simple}, {@link Error} and
+ * the protocol-dependent types {@link Dbl}, {@link Map}, {@link Pairs} and
+ * {@link Verbatim}. The same reply value is encoded per connection: in RESP2
+ * a double is a bulk string, a map a flat array and null {@code $-1}; in RESP3
+ * ({@code HELLO 3}) they use the native {@code ,} {@code %} and {@code _}
+ * types, exactly as Redis 7 does.
  */
 public final class Resp {
     private static final int MAX_BULK = 512 * 1024 * 1024;
@@ -82,6 +86,171 @@ public final class Resp {
     }
 
     public static final Simple OK = new Simple("OK");
+
+    /**
+     * A double reply (ZSCORE, ZINCRBY, WITHSCORES scores): a bulk string in
+     * RESP2, the {@code ,} type in RESP3.
+     */
+    public static final class Dbl {
+        public final double value;
+
+        public Dbl(double value) {
+            this.value = value;
+        }
+
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Dbl && Double.compare(((Dbl)o).value,
+                value) == 0;
+        }
+
+
+        @Override
+        public int hashCode() {
+            return Double.hashCode(value);
+        }
+
+
+        @Override
+        public String toString() {
+            return CommandHandler.fmt(value);
+        }
+    }
+
+    /**
+     * A map reply given as alternating keys and values (HELLO): a flat array
+     * in RESP2, the {@code %} type in RESP3.
+     */
+    public static final class Map {
+        public final List<Object> keysAndValues;
+
+        public Map(List<Object> keysAndValues) {
+            if (keysAndValues.size() % 2 != 0) {
+                throw new IllegalArgumentException("odd number of map items");
+            }
+            this.keysAndValues = keysAndValues;
+        }
+
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Map && ((Map)o).keysAndValues.equals(
+                keysAndValues);
+        }
+
+
+        @Override
+        public int hashCode() {
+            return keysAndValues.hashCode();
+        }
+
+
+        @Override
+        public String toString() {
+            return "%" + keysAndValues;
+        }
+    }
+
+    /**
+     * Member/score pairs given as a flat list ({@code ZRANGE ... WITHSCORES}):
+     * a flat array in RESP2, an array of two-element arrays in RESP3.
+     */
+    public static final class Pairs {
+        public final List<Object> flat;
+
+        public Pairs(List<Object> flat) {
+            if (flat.size() % 2 != 0) {
+                throw new IllegalArgumentException("odd number of pair items");
+            }
+            this.flat = flat;
+        }
+
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Pairs && ((Pairs)o).flat.equals(flat);
+        }
+
+
+        @Override
+        public int hashCode() {
+            return flat.hashCode();
+        }
+
+
+        @Override
+        public String toString() {
+            return "pairs" + flat;
+        }
+    }
+
+    /**
+     * A verbatim string with a three-letter format such as {@code txt}
+     * (INFO): a bulk string in RESP2, the {@code =} type in RESP3.
+     */
+    public static final class Verbatim {
+        public final String format;
+        public final String text;
+
+        public Verbatim(String format, String text) {
+            if (format.length() != 3) {
+                throw new IllegalArgumentException("format must be 3 chars");
+            }
+            this.format = format;
+            this.text = text;
+        }
+
+
+        @Override
+        public boolean equals(Object o) {
+            return o instanceof Verbatim && ((Verbatim)o).format.equals(format)
+                && ((Verbatim)o).text.equals(text);
+        }
+
+
+        @Override
+        public int hashCode() {
+            return format.hashCode() * 31 + text.hashCode();
+        }
+
+
+        @Override
+        public String toString() {
+            return text;
+        }
+    }
+
+    /**
+     * Lowers a reply to the plain values a RESP2 client would decode:
+     * doubles become their bulk-string form, maps and pairs flat lists,
+     * verbatim strings plain strings. Handy for comparing replies in tests.
+     *
+     * @return an equivalent reply built only from String, Long, List, null,
+     *         {@link Simple} and {@link Error}
+     */
+    public static Object toResp2(Object reply) {
+        if (reply instanceof Dbl) {
+            return reply.toString();
+        }
+        if (reply instanceof Verbatim) {
+            return ((Verbatim)reply).text;
+        }
+        if (reply instanceof Map) {
+            return toResp2(((Map)reply).keysAndValues);
+        }
+        if (reply instanceof Pairs) {
+            return toResp2(((Pairs)reply).flat);
+        }
+        if (reply instanceof Collection) {
+            List<Object> out = new ArrayList<>();
+            for (Object item : (Collection<?>)reply) {
+                out.add(toResp2(item));
+            }
+            return out;
+        }
+        return reply;
+    }
 
     /** Thrown for malformed input; the connection should send an error and close. */
     public static final class ProtocolException extends IOException {
@@ -175,11 +344,22 @@ public final class Resp {
     }
 
 
-    /** Encodes a reply value to bytes. */
+    /** Encodes a reply value to RESP2 bytes. */
     public static byte[] encode(Object reply) {
+        return encode(reply, 2);
+    }
+
+
+    /**
+     * Encodes a reply value to bytes.
+     *
+     * @param proto
+     *            the protocol version, 2 or 3
+     */
+    public static byte[] encode(Object reply, int proto) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try {
-            write(out, reply);
+            write(out, reply, proto);
         }
         catch (IOException e) {
             throw new IllegalStateException(e); // cannot happen for a byte buffer
@@ -188,10 +368,72 @@ public final class Resp {
     }
 
 
-    /** Writes a reply value. */
+    /** Writes a reply value in RESP2. */
     public static void write(OutputStream out, Object reply) throws IOException {
+        write(out, reply, 2);
+    }
+
+
+    /**
+     * Writes a reply value.
+     *
+     * @param proto
+     *            the connection's protocol version, 2 or 3
+     */
+    public static void write(OutputStream out, Object reply, int proto)
+        throws IOException {
+        boolean resp3 = proto >= 3;
         if (reply == null) {
-            ascii(out, "$-1\r\n");
+            ascii(out, resp3 ? "_\r\n" : "$-1\r\n");
+        }
+        else if (reply instanceof Dbl) {
+            if (resp3) {
+                double d = ((Dbl)reply).value;
+                ascii(out, "," + (Double.isNaN(d) ? "nan" : reply.toString())
+                    + "\r\n");
+            }
+            else {
+                write(out, reply.toString(), proto);
+            }
+        }
+        else if (reply instanceof Map) {
+            List<Object> kv = ((Map)reply).keysAndValues;
+            if (resp3) {
+                ascii(out, "%" + kv.size() / 2 + "\r\n");
+                for (Object item : kv) {
+                    write(out, item, proto);
+                }
+            }
+            else {
+                write(out, kv, proto);
+            }
+        }
+        else if (reply instanceof Pairs) {
+            List<Object> flat = ((Pairs)reply).flat;
+            if (resp3) {
+                ascii(out, "*" + flat.size() / 2 + "\r\n");
+                for (int i = 0; i < flat.size(); i += 2) {
+                    ascii(out, "*2\r\n");
+                    write(out, flat.get(i), proto);
+                    write(out, flat.get(i + 1), proto);
+                }
+            }
+            else {
+                write(out, flat, proto);
+            }
+        }
+        else if (reply instanceof Verbatim) {
+            Verbatim v = (Verbatim)reply;
+            if (resp3) {
+                byte[] b = (v.format + ":" + v.text).getBytes(
+                    StandardCharsets.UTF_8);
+                ascii(out, "=" + b.length + "\r\n");
+                out.write(b);
+                ascii(out, "\r\n");
+            }
+            else {
+                write(out, v.text, proto);
+            }
         }
         else if (reply instanceof Simple) {
             ascii(out, "+" + ((Simple)reply).text + "\r\n");
@@ -213,7 +455,7 @@ public final class Resp {
             Collection<?> items = (Collection<?>)reply;
             ascii(out, "*" + items.size() + "\r\n");
             for (Object item : items) {
-                write(out, item);
+                write(out, item, proto);
             }
         }
         else {

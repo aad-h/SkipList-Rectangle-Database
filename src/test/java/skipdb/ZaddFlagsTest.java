@@ -18,7 +18,7 @@ public class ZaddFlagsTest {
     private CommandHandler h;
 
     private Object run(String line) {
-        return h.execute(Arrays.asList(line.split(" ")));
+        return Resp.toResp2(h.execute(Arrays.asList(line.split(" "))));
     }
 
 
@@ -186,6 +186,6 @@ public class ZaddFlagsTest {
         for (List<String> c : log) {
             replay.execute(c);
         }
-        assertEquals("3", replay.execute(Arrays.asList("ZSCORE", "z", "a")));
+        assertEquals(new Resp.Dbl(3), replay.execute(Arrays.asList("ZSCORE", "z", "a")));
     }
 }

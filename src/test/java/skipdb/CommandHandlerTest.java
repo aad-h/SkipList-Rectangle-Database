@@ -14,7 +14,7 @@ public class CommandHandlerTest {
     private CommandHandler h;
 
     private Object run(String line) {
-        return h.execute(Arrays.asList(line.split(" ")));
+        return Resp.toResp2(h.execute(Arrays.asList(line.split(" "))));
     }
 
 

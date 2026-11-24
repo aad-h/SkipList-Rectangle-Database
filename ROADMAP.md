@@ -23,7 +23,7 @@ Target resume line:
 - [x] Randomized tests against `TreeSet`, protocol tests, socket integration test
 
 ## Phase 2: Durability, expiry & RESP3
-- [ ] RESP3 (`HELLO 3`): redis-py 8 defaults to it; needs map/double/null types
+- [x] RESP3 (`HELLO 3`): redis-py 8 defaults to it; needs map/double/null types
 - [x] Append-only file (AOF) with `everysec` / `always` fsync, replay on startup
 - [x] AOF rewrite/compaction
 - [x] `EXPIRE` / `TTL` with lazy + periodic eviction
@@ -53,7 +53,7 @@ README if user-visible. Tick the box in the same commit that finishes it.
 - [x] 3. Key expiry: `EXPIRE`, `PEXPIRE`, `TTL`, `PTTL`, `PERSIST`, `SET ... EX/PX`; lazy expiry on access + periodic sampling sweep; injectable clock for tests
 - [x] 4. `ZADD` flags: `NX`, `XX`, `GT`, `LT`, `CH`, `INCR` with Redis's exact compatibility rules and errors
 - [x] 5. More sorted-set commands: `ZPOPMIN`, `ZPOPMAX`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZMSCORE`, `ZRANDMEMBER`
-- [ ] 6. RESP3 support (`HELLO 3`): maps, doubles, nulls, per-connection protocol so redis-py 8 works without `protocol=2`
+- [x] 6. RESP3 support (`HELLO 3`): maps, doubles, nulls, per-connection protocol so redis-py 8 works without `protocol=2`
 - [ ] 7. Benchmark harness (`skipdb.bench`): RankedSkipList vs `TreeMap` vs `ConcurrentSkipListMap` for insert/rank/range at 10k–1M elements, warmup + repeated trials, CSV output, results table in README
 - [ ] 8. Single-threaded NIO event-loop server (`--io nio`), Redis's model; compare against thread-per-client with `redis-benchmark` and document throughput/p99
 - [ ] 9. Live leaderboard demo: tiny HTTP server (`com.sun.net.httpserver`) + one HTML page that polls SkipDB and animates rank changes; `--demo` flag

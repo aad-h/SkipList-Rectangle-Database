@@ -322,26 +322,20 @@ public final class CommandHandler {
                 return a.get(1);
             case "command":
                 return new ArrayList<>(); // redis-cli probes this on connect
-            case "hello": {
-                // client handshake (redis-py, Jedis, Lettuce); only RESP2 here
-                if (a.size() > 1 && !a.get(1).equals("2")) {
-                    throw new CommandError(
-                        "NOPROTO sorry, this protocol version is not supported");
-                }
-                return java.util.Arrays.asList("server", "skipdb", "version",
-                    "0.1.0", "proto", 2L, "id", 1L, "mode", "standalone",
-                    "role", "master", "modules", new ArrayList<>());
-            }
+            case "hello":
+                // the server handles HELLO per connection; this is the
+                // stateless form for direct callers
+                return helloReply(helloProtocol(a, 2), 1L);
             case "client":
             case "select":
                 // CLIENT SETNAME/SETINFO and SELECT 0 are sent by clients on
                 // connect; there is a single database, so accept and ignore
                 return Resp.OK;
             case "info":
-                return "# Server\r\nredis_version:7.0.0-skipdb\r\nskipdb_version:0.1.0\r\n"
+                return new Resp.Verbatim("txt", "# Server\r\nredis_version:7.0.0-skipdb\r\nskipdb_version:0.1.0\r\n"
                     + "# Stats\r\nexpired_keys:" + expiredKeys + "\r\n"
                     + "# Keyspace\r\ndb0:keys=" + db.size() + ",expires="
-                    + expires.size() + "\r\n";
+                    + expires.size() + "\r\n");
             case "dbsize":
                 arity(cmd, a, 1, 1);
                 return (long)db.size();
@@ -437,7 +431,7 @@ public final class CommandHandler {
                 double d = SortedSet.parseScore(a.get(2));
                 SortedSet z = zsetOrCreate(a.get(1));
                 try {
-                    return fmt(z.incrBy(a.get(3), d));
+                    return new Resp.Dbl(z.incrBy(a.get(3), d));
                 }
                 catch (IllegalArgumentException e) {
                     throw new CommandError("ERR resulting score is not a number (NaN)");
@@ -447,7 +441,7 @@ public final class CommandHandler {
                 arity(cmd, a, 3, 3);
                 SortedSet z = zset(a.get(1));
                 Double s = z == null ? null : z.score(a.get(2));
-                return s == null ? null : fmt(s);
+                return s == null ? null : new Resp.Dbl(s);
             }
             case "zcard": {
                 arity(cmd, a, 2, 2);
@@ -553,7 +547,7 @@ public final class CommandHandler {
                 List<Object> out = new ArrayList<>(a.size() - 2);
                 for (String m : a.subList(2, a.size())) {
                     Double s = z == null ? null : z.score(m);
-                    out.add(s == null ? null : fmt(s));
+                    out.add(s == null ? null : new Resp.Dbl(s));
                 }
                 return out;
             }
@@ -853,7 +847,7 @@ public final class CommandHandler {
             rewritten = NONE;
         }
         if (incr) {
-            return processed ? fmt(score) : null;
+            return processed ? new Resp.Dbl(score) : null;
         }
         return ch ? added + updated : added;
     }
@@ -897,6 +891,15 @@ public final class CommandHandler {
                 aof.add(e.member);
             }
             rewritten = aof;
+        }
+        if (a.size() == 2) {
+            // no count: one flat member/score pair, even in RESP3 (Redis 7)
+            List<Object> one = new ArrayList<>(2);
+            for (SortedSet.Entry e : es) {
+                one.add(e.member);
+                one.add(new Resp.Dbl(e.score));
+            }
+            return one;
         }
         return entries(es, true);
     }
@@ -1014,16 +1017,88 @@ public final class CommandHandler {
     }
 
 
-    private static List<Object> entries(List<SortedSet.Entry> es,
+    /**
+     * @return the members, or with scores member/score {@link Resp.Pairs}
+     *         (a flat array in RESP2, nested two-element arrays in RESP3)
+     */
+    private static Object entries(List<SortedSet.Entry> es,
         boolean withScores) {
         List<Object> out = new ArrayList<>(es.size() * (withScores ? 2 : 1));
         for (SortedSet.Entry e : es) {
             out.add(e.member);
             if (withScores) {
-                out.add(fmt(e.score));
+                out.add(new Resp.Dbl(e.score));
             }
         }
-        return out;
+        return withScores ? new Resp.Pairs(out) : out;
+    }
+
+
+    /**
+     * Validates {@code HELLO [protover [AUTH username password] [SETNAME
+     * name]]} with Redis's errors. There is only the {@code default} user
+     * with no password, so AUTH accepts any password for it.
+     *
+     * @param a
+     *            the command and its arguments
+     * @param current
+     *            the connection's protocol, kept when no version is given
+     * @return the protocol version (2 or 3) the connection should switch to
+     * @throws CommandError
+     *             if the version or an option is invalid; the protocol must
+     *             then stay unchanged
+     */
+    static int helloProtocol(List<String> a, int current) {
+        int proto = current;
+        if (a.size() > 1) {
+            long ver;
+            try {
+                ver = Long.parseLong(a.get(1));
+            }
+            catch (NumberFormatException e) {
+                throw new CommandError(
+                    "ERR Protocol version is not an integer or out of range");
+            }
+            if (ver < 2 || ver > 3) {
+                throw new CommandError(
+                    "NOPROTO unsupported protocol version");
+            }
+            proto = (int)ver;
+        }
+        for (int i = 2; i < a.size(); i++) {
+            String opt = a.get(i);
+            int more = a.size() - i - 1;
+            if (opt.equalsIgnoreCase("auth") && more >= 2) {
+                if (!a.get(i + 1).equals("default")) {
+                    throw new CommandError("WRONGPASS invalid username-password "
+                        + "pair or user is disabled.");
+                }
+                i += 2;
+            }
+            else if (opt.equalsIgnoreCase("setname") && more >= 1) {
+                for (char c : a.get(++i).toCharArray()) {
+                    if (c < '!' || c > '~') {
+                        throw new CommandError("ERR Client names cannot contain "
+                            + "spaces, newlines or special characters.");
+                    }
+                }
+            }
+            else {
+                throw new CommandError("ERR Syntax error in HELLO option '"
+                    + opt + "'");
+            }
+        }
+        return proto;
+    }
+
+
+    /**
+     * @return the HELLO reply map (a flat array in RESP2), as Redis 7 sends it
+     */
+    static Resp.Map helloReply(int proto, long clientId) {
+        return new Resp.Map(Arrays.asList("server", "skipdb", "version",
+            "0.1.0", "proto", (long)proto, "id", clientId, "mode",
+            "standalone", "role", "master", "modules", new ArrayList<>()));
     }
 
 
