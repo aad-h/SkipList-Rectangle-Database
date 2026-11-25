@@ -30,7 +30,7 @@ Target resume line:
 - [x] `ZADD` flags: NX, XX, GT, LT, CH, INCR
 
 ## Phase 3: Performance
-- [ ] JMH benchmarks: RankedSkipList vs `TreeMap` vs `ConcurrentSkipListMap`
+- [x] Micro-benchmarks (`skipdb.bench`, hand-rolled harness): RankedSkipList vs `TreeMap` vs `ConcurrentSkipListMap`
 - [ ] End-to-end benchmark with `redis-benchmark` vs real Redis on the same box
 - [ ] Single-threaded NIO event loop (Redis model) vs thread-per-client: compare
       throughput and p99 latency
@@ -54,7 +54,7 @@ README if user-visible. Tick the box in the same commit that finishes it.
 - [x] 4. `ZADD` flags: `NX`, `XX`, `GT`, `LT`, `CH`, `INCR` with Redis's exact compatibility rules and errors
 - [x] 5. More sorted-set commands: `ZPOPMIN`, `ZPOPMAX`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZMSCORE`, `ZRANDMEMBER`
 - [x] 6. RESP3 support (`HELLO 3`): maps, doubles, nulls, per-connection protocol so redis-py 8 works without `protocol=2`
-- [ ] 7. Benchmark harness (`skipdb.bench`): RankedSkipList vs `TreeMap` vs `ConcurrentSkipListMap` for insert/rank/range at 10k–1M elements, warmup + repeated trials, CSV output, results table in README
+- [x] 7. Benchmark harness (`skipdb.bench`): RankedSkipList vs `TreeMap` vs `ConcurrentSkipListMap` for insert/rank/range at 10k–1M elements, warmup + repeated trials, CSV output, results table in README
 - [ ] 8. Single-threaded NIO event-loop server (`--io nio`), Redis's model; compare against thread-per-client with `redis-benchmark` and document throughput/p99
 - [ ] 9. Live leaderboard demo: tiny HTTP server (`com.sun.net.httpserver`) + one HTML page that polls SkipDB and animates rank changes; `--demo` flag
 - [ ] 10. Dockerfile, architecture diagram (Mermaid) in README, final results section and resume-ready summary

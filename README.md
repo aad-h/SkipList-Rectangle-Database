@@ -98,6 +98,8 @@ r.zrangebyscore("board", 90, "+inf", withscores=True)  # [('carol', 92.0), ...]
   active-expiry sweep.
 - `Aof`: append-only file writer with fsync policies, crash-tolerant
   replayer, and background rewrite (compaction).
+- `bench.Bench`: micro-benchmark harness comparing `RankedSkipList` with
+  `TreeMap` and `ConcurrentSkipListMap` (CSV + Markdown output).
 
 **Commands:** `ZADD` (with `NX XX GT LT CH INCR`, replies and errors matching
 Redis 7 byte-for-byte), `ZINCRBY ZSCORE ZCARD ZREM ZRANK ZREVRANK ZRANGE ZREVRANGE
@@ -111,6 +113,46 @@ ZRANDMEMBER` (ZPOPs reach the AOF as a deterministic `ZREM`), `SET GET DEL EXIST
 benchmark yet, see the roadmap): ~80k `GET`/`SET` per second and ~44k `ZADD`
 per second into a sorted set growing to ~63k members, p50 ≈ 0.2 ms.
 
+**Data-structure benchmark** (`skipdb.bench`): the same seeded data
+(distinct members, integer scores with many ties) loaded into `RankedSkipList`,
+`TreeMap` and `ConcurrentSkipListMap` keyed by (score, member), then random
+`ZRANK`-style rank queries, `ZRANGE start start+9` (range by rank) and
+`ZRANGEBYSCORE min +inf LIMIT 0 10`. Median ns/op over 5 trials after 2
+warmup trials, Java 21, 2-vCPU Xeon @ 2.1 GHz dev container:
+
+| op | n | RankedSkipList | TreeMap | ConcurrentSkipListMap |
+|---|--:|--:|--:|--:|
+| insert | 10,000 | 607 ns | 175 ns | 366 ns |
+| insert | 100,000 | 1082 ns | 391 ns | 744 ns |
+| insert | 1,000,000 | 2358 ns | 1068 ns | 1919 ns |
+| rank | 10,000 | 582 ns | 45.7 us | 32.5 us |
+| rank | 100,000 | 1093 ns | 3.00 ms | 2.53 ms |
+| rank | 1,000,000 | 2611 ns | 111.61 ms | 95.25 ms |
+| range | 10,000 | 579 ns | 44.1 us | 33.6 us |
+| range | 100,000 | 1460 ns | 3.06 ms | 2.48 ms |
+| range | 1,000,000 | 3096 ns | 108.53 ms | 96.89 ms |
+| rangebyscore | 10,000 | 384 ns | 863 ns | 612 ns |
+| rangebyscore | 100,000 | 1252 ns | 1364 ns | 1445 ns |
+| rangebyscore | 1,000,000 | 3599 ns | 3936 ns | 4941 ns |
+
+The spans are the whole story: the JDK maps keep no subtree sizes, so rank and
+select-by-rank walk the entries (O(rank)) and fall ~40,000× behind at a
+million entries, while score-range queries, which only need ordered search,
+are a tie. Plain inserts are where the JDK wins: `TreeMap` is 2–3.5× faster
+and `ConcurrentSkipListMap` 1.2–1.7× faster, since `RankedSkipList.insert`
+also maintains spans and allocates two 32-slot scratch arrays per call (an
+obvious thing to optimize). This is a hand-rolled harness rather than JMH
+(Maven Central was unreachable when it was written): it guards against
+dead-code elimination with a volatile sink, forces a GC and rotates the
+structure order every trial, and stops a read batch after `--budget-ms`
+(default 500 ms), so the O(n) rank/range figures for the JDK maps at 1M come
+from 8 queries per trial; the CSV records how many ops each number covers.
+
+```bash
+java -Xmx2g -cp target/classes skipdb.bench.Bench \
+    --sizes 10000,100000,1000000 --trials 5 --warmup 2 --queries 1000 --csv bench.csv
+```
+
 **Tests:** 20,000 random operations checked against a `TreeSet` model, RESP
 encoding edge cases (UTF-8 byte lengths, malformed input), command semantics,
 socket tests for pipelining, transactions, protocol errors and 8
@@ -122,7 +164,9 @@ score round-trips including `-0` and `inf`), and expiry tests on a fake clock
 and an AOF replayed at three different later times giving the same data), and
 RESP3 tests (encoder bytes for every type, `HELLO` validation, one connection
 in RESP3 beside one in RESP2, transactions). RESP3 replies were diffed
-byte-for-byte against Redis 7.0.15. Also verified against real `redis-cli`,
+byte-for-byte against Redis 7.0.15. Benchmark tests check that all three
+benchmarked structures return identical ranks and ranges, plus flag parsing,
+the time budget and the output formats. Also verified against real `redis-cli`,
 `redis-benchmark` and `redis-py` 8 (default RESP3).
 
 See [ROADMAP.md](ROADMAP.md) for persistence, expiry, benchmarks and the demo.
