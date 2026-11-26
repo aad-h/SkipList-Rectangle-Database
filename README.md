@@ -118,9 +118,34 @@ ZRANDMEMBER` (ZPOPs reach the AOF as a deterministic `ZREM`), `SET GET DEL EXIST
 `PING ECHO INFO HELLO (2|3) CLIENT SELECT COMMAND`, `MULTI EXEC DISCARD`,
 `BGREWRITEAOF`, `QUIT`.
 
-**First numbers** (`redis-benchmark`, 20 clients, dev container; not a tuned
-benchmark yet, see the roadmap): ~80k `GET`/`SET` per second and ~44k `ZADD`
-per second into a sorted set growing to ~63k members, p50 ≈ 0.2 ms.
+**Server benchmark: threads vs event loop vs Redis** (`redis-benchmark -r
+100000 -t set,get,zadd`, so `ZADD` grows one sorted set to ~100k members;
+SkipDB on JDK 21 after a warmup run, Redis 7.0.15 with persistence off; all
+three servers and the benchmark client share one 2-vCPU dev container, so
+read the ratios, not the absolute numbers). Requests/s, with p99 latency:
+
+| Workload | SkipDB `threads` | SkipDB `nio` | Redis 7 |
+|---|---|---|---|
+| `SET`, 50 clients | 73k, p99 1.39 ms | 102k, p99 0.78 ms | 108k, p99 0.84 ms |
+| `GET`, 50 clients | 74k, p99 0.91 ms | 113k, p99 0.85 ms | 118k, p99 0.58 ms |
+| `ZADD`, 50 clients | 53k, p99 3.86 ms | 66k, p99 2.17 ms | 102k, p99 0.95 ms |
+| `SET`, 50 clients, pipeline 16 | 540k, p99 5.4 ms | 623k, p99 2.7 ms | 837k, p99 1.7 ms |
+| `ZADD`, 50 clients, pipeline 16 | 83k, p99 59.9 ms | 137k, p99 10.7 ms | 303k, p99 4.4 ms |
+| `SET`, 500 clients | 57k, p99 12.7 ms | 93k, p99 7.7 ms | 102k, p99 7.1 ms |
+| `ZADD`, 500 clients | 41k, p99 36.5 ms | 68k, p99 14.3 ms | 95k, p99 8.5 ms |
+
+The event loop delivers 1.2–1.7x the throughput of thread-per-client and
+up to 5.6x lower p99 (pipelined `ZADD`): with two cores, hundreds of client
+threads contend for the command lock and the scheduler (a repeat run at 500
+clients saw thread-mode p99 of 40–130 ms; `nio` stayed at 5–12 ms). For
+unpipelined `GET`/`SET` the event loop is within ~6% of Redis; the remaining
+gap is pipelined throughput and especially `ZADD` (Java object allocation per member and string-keyed
+hashing vs Redis's compact `listpack`/`skiplist` in C).
+
+```bash
+java -cp target/classes skipdb.SkipDBServer 6380 --io nio
+redis-benchmark -p 6380 -q -r 100000 -t set,get,zadd -c 50 -n 300000
+```
 
 **Data-structure benchmark** (`skipdb.bench`): the same seeded data
 (distinct members, integer scores with many ties) loaded into `RankedSkipList`,
@@ -180,7 +205,7 @@ in RESP3 beside one in RESP2, transactions). RESP3 replies were diffed
 byte-for-byte against Redis 7.0.15. Benchmark tests check that all three
 benchmarked structures return identical ranks and ranges, plus flag parsing,
 the time budget and the output formats. Also verified against real `redis-cli`,
-`redis-benchmark` and `redis-py` 8 (default RESP3).
+`redis-benchmark` and `redis-py` 8 (default RESP3), in both I/O models.
 
 See [ROADMAP.md](ROADMAP.md) for persistence, expiry, benchmarks and the demo.
 
