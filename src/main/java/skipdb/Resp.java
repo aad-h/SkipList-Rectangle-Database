@@ -344,6 +344,150 @@ public final class Resp {
     }
 
 
+    /**
+     * Incremental request decoder for non-blocking I/O: bytes arrive in
+     * arbitrary chunks via {@link #feed}, and {@link #next} returns each
+     * command once all of its bytes are buffered. It accepts exactly what
+     * {@link Resp#readCommand} accepts, with the same error messages, so the
+     * blocking and event-loop servers behave identically on the wire.
+     */
+    public static final class Decoder {
+        private static final int MAX_LINE = 64 * 1024;
+        private byte[] buf = new byte[16 * 1024];
+        private int start; // first unconsumed byte
+        private int end; // one past the last buffered byte
+        private int pos; // scan cursor during one parse attempt
+
+        /** Appends all remaining bytes of {@code src} to the buffer. */
+        public void feed(java.nio.ByteBuffer src) {
+            int n = src.remaining();
+            if (end + n > buf.length) {
+                int live = end - start;
+                byte[] dst = live + n > buf.length
+                    ? new byte[Math.max(buf.length * 2, live + n)]
+                    : buf;
+                System.arraycopy(buf, start, dst, 0, live);
+                buf = dst;
+                start = 0;
+                end = live;
+            }
+            src.get(buf, end, n);
+            end += n;
+        }
+
+
+        /** Appends {@code len} bytes of {@code b} starting at {@code off}. */
+        public void feed(byte[] b, int off, int len) {
+            feed(java.nio.ByteBuffer.wrap(b, off, len));
+        }
+
+
+        /** @return the number of buffered bytes not yet decoded */
+        public int buffered() {
+            return end - start;
+        }
+
+
+        /**
+         * Decodes the next complete command.
+         *
+         * @return the command and its arguments, an empty list for a blank
+         *         inline line, or null if more bytes are needed
+         * @throws ProtocolException
+         *             on malformed input; the connection should be closed
+         */
+        public List<String> next() throws ProtocolException {
+            if (start == end) {
+                return null;
+            }
+            pos = start;
+            List<String> cmd = parse();
+            if (cmd != null) {
+                start = pos;
+                if (start == end) {
+                    start = 0;
+                    end = 0;
+                }
+            }
+            return cmd;
+        }
+
+
+        private List<String> parse() throws ProtocolException {
+            if (buf[pos] != '*') {
+                String line = line();
+                if (line == null) {
+                    return null;
+                }
+                String trimmed = line.trim();
+                return trimmed.isEmpty()
+                    ? new ArrayList<>()
+                    : new ArrayList<>(Arrays.asList(trimmed.split("\\s+")));
+            }
+            pos++;
+            String header = line();
+            if (header == null) {
+                return null;
+            }
+            int n = parseInt(header);
+            if (n < 0 || n > MAX_ARRAY) {
+                throw new ProtocolException("invalid multibulk length");
+            }
+            List<String> args = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                if (pos == end) {
+                    return null;
+                }
+                if (buf[pos] != '$') {
+                    throw new ProtocolException("expected '$'");
+                }
+                pos++;
+                String lenLine = line();
+                if (lenLine == null) {
+                    return null;
+                }
+                int len = parseInt(lenLine);
+                if (len < 0 || len > MAX_BULK) {
+                    throw new ProtocolException("invalid bulk length");
+                }
+                if (end - pos < (long)len + 2) {
+                    return null;
+                }
+                if (buf[pos + len] != '\r' || buf[pos + len + 1] != '\n') {
+                    throw new ProtocolException(
+                        "expected CRLF after bulk string");
+                }
+                args.add(new String(buf, pos, len, StandardCharsets.UTF_8));
+                pos += len + 2;
+            }
+            return args;
+        }
+
+
+        /** Reads up to LF (dropping a trailing CR), or null if incomplete. */
+        private String line() throws ProtocolException {
+            for (int i = pos; i < end; i++) {
+                if (buf[i] == '\n') {
+                    int len = i - pos;
+                    if (len > MAX_LINE) {
+                        throw new ProtocolException("line too long");
+                    }
+                    if (len > 0 && buf[i - 1] == '\r') {
+                        len--;
+                    }
+                    String s = new String(buf, pos, len, StandardCharsets.UTF_8);
+                    pos = i + 1;
+                    return s;
+                }
+            }
+            if (end - pos > MAX_LINE) {
+                throw new ProtocolException("line too long");
+            }
+            return null;
+        }
+    }
+
+
     /** Encodes a reply value to RESP2 bytes. */
     public static byte[] encode(Object reply) {
         return encode(reply, 2);

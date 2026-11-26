@@ -91,9 +91,18 @@ r.zrangebyscore("board", 90, "+inf", withscores=True)  # [('carol', 92.0), ...]
 - `SortedSet`: hash map (member → score, O(1) `ZSCORE`) + ranked skip list.
 - `Resp`: RESP parser and RESP2/RESP3 encoder (doubles, maps, nulls,
   verbatim strings), including inline commands and pipelining.
-- `SkipDBServer`: thread-per-client TCP server; commands execute under one
-  lock, so there are no data races (Redis's single-threaded execution model).
-  `MULTI`/`EXEC`/`DISCARD` run queued commands as one atomic batch.
+- `SkipDBServer`: TCP server with two I/O models (`--io threads|nio`).
+  Either way commands execute under one lock, so there are no data races
+  (Redis's single-threaded execution model). `MULTI`/`EXEC`/`DISCARD` run
+  queued commands as one atomic batch.
+  - `threads` (default): a thread per client doing blocking reads.
+  - `nio`: Redis's event loop. One thread multiplexes every socket through a
+    `Selector`; `Resp.Decoder` decodes requests incrementally from whatever
+    bytes arrived, all complete pipelined commands run in order, and replies
+    go into a per-client output buffer written without blocking (leftovers
+    wait for `OP_WRITE`). Once 1 MiB of replies is queued the client stops
+    being read and its buffered commands wait (backpressure, so a client that
+    pipelines without reading cannot exhaust memory).
 - `Expires`: key → expiry-time index with O(1) random sampling for the
   active-expiry sweep.
 - `Aof`: append-only file writer with fsync policies, crash-tolerant
@@ -156,7 +165,11 @@ java -Xmx2g -cp target/classes skipdb.bench.Bench \
 **Tests:** 20,000 random operations checked against a `TreeSet` model, RESP
 encoding edge cases (UTF-8 byte lengths, malformed input), command semantics,
 socket tests for pipelining, transactions, protocol errors and 8
-concurrent clients, and AOF tests (restart round-trip, a torn write cut at
+concurrent clients (every socket test runs against both I/O models, plus
+3 MiB values, a 30,000-command pipeline from a client that is not reading,
+half-closed sockets and `QUIT`), a differential test feeding random
+pipelines to the incremental decoder in random chunk sizes and checking it
+against the blocking reader (same commands, same protocol errors), and AOF tests (restart round-trip, a torn write cut at
 every byte offset, unfinished transactions, corrupt files, fsync counts per
 policy, rewrites that race with concurrent writes, failed rewrites, exact
 score round-trips including `-0` and `inf`), and expiry tests on a fake clock
