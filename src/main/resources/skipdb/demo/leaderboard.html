@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkipDB Leaderboard</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #6b7280;
+    --line: #e5e7eb; --bar: #dbe4ff; --accent: #3b5bdb;
+    --up: #2b8a3e; --down: #c92a2a; --flash: #fff3bf;
+    --row: 44px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101216; --panel: #181b21; --text: #e7e9ee; --muted: #8b93a1;
+      --line: #262a33; --bar: #24305a; --accent: #91a7ff;
+      --up: #69db7c; --down: #ff8787; --flash: #4a3f12;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+  .stat {
+    flex: 1 1 120px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 12px;
+  }
+  .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .board {
+    position: relative; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; overflow: hidden;
+  }
+  .row {
+    position: absolute; left: 0; right: 0; height: var(--row);
+    display: flex; align-items: center; gap: 12px; padding: 0 12px;
+    border-bottom: 1px solid var(--line); cursor: pointer;
+    transition: transform 600ms cubic-bezier(.2,.8,.2,1), opacity 300ms;
+  }
+  .row:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+  .bar {
+    position: absolute; left: 0; top: 0; bottom: 0; background: var(--bar);
+    opacity: .55; transition: width 600ms ease; z-index: 0;
+  }
+  .row > :not(.bar) { position: relative; z-index: 1; }
+  .rank { width: 28px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  .move { width: 40px; font-size: 12px; font-weight: 600; opacity: 0; transition: opacity 1.5s; }
+  .move.show { opacity: 1; transition: none; }
+  .move.up { color: var(--up); } .move.down { color: var(--down); }
+  .score { width: 72px; text-align: right; font-variant-numeric: tabular-nums; border-radius: 4px; padding: 2px 4px; }
+  .score.flash { background: var(--flash); transition: none; }
+  .score { transition: background 1s; }
+  .find { display: flex; gap: 8px; margin: 16px 0 4px; }
+  .find input {
+    flex: 1; min-width: 0; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit;
+  }
+  .find button {
+    padding: 8px 14px; border-radius: 6px; border: 0; background: var(--accent);
+    color: var(--bg); font: inherit; font-weight: 600; cursor: pointer;
+  }
+  #found { color: var(--muted); min-height: 1.4em; }
+  #status { color: var(--down); min-height: 1.4em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SkipDB live leaderboard</h1>
+  <p class="sub">Polls <code>ZREVRANGE <span id="key">demo:board</span> 0 N WITHSCORES</code>
+    over RESP twice a second. Click a player to <code>ZINCRBY</code> them +25.</p>
+  <div class="stats">
+    <div class="stat"><b id="players">-</b><span>players (ZCARD)</span></div>
+    <div class="stat"><b id="writes">-</b><span>demo writes</span></div>
+    <div class="stat"><b id="latency">-</b><span>ZREVRANGE + ZCARD</span></div>
+    <div class="stat"><b id="rtt">-</b><span>HTTP poll</span></div>
+  </div>
+  <div class="board" id="board"></div>
+  <form class="find" id="find">
+    <input id="who" placeholder="Player name, e.g. grace" maxlength="64" autocomplete="off">
+    <button>Find rank</button>
+  </form>
+  <div id="found"></div>
+  <div id="status"></div>
+</main>
+<script>
+"use strict";
+const TOP = 15, POLL_MS = 500;
+const board = document.getElementById("board");
+const rows = new Map();      // member -> {el, rank, score}
+board.style.height = `calc(var(--row) * ${TOP})`;
+
+function rowFor(member) {
+  let r = rows.get(member);
+  if (r) return r;
+  const el = document.createElement("div");
+  el.className = "row";
+  el.innerHTML = '<div class="bar"></div><div class="rank"></div>' +
+    '<div class="name"></div><div class="move"></div><div class="score"></div>';
+  el.querySelector(".name").textContent = member;
+  el.style.opacity = "0";
+  el.style.transform = `translateY(calc(var(--row) * ${TOP}))`;
+  el.addEventListener("click", () => bump(member));
+  board.appendChild(el);
+  r = { el, rank: null, score: null };
+  rows.set(member, r);
+  return r;
+}
+
+function render(data) {
+  document.getElementById("key").textContent = data.key;
+  document.getElementById("players").textContent = data.players;
+  document.getElementById("writes").textContent = data.writes.toLocaleString();
+  document.getElementById("latency").textContent = data.latencyMicros + " µs";
+  const best = data.top.length ? Math.max(data.top[0].score || 0, 1) : 1;
+  const seen = new Set();
+  data.top.forEach((p, i) => {
+    seen.add(p.member);
+    const r = rowFor(p.member);
+    const el = r.el;
+    requestAnimationFrame(() => {
+      el.style.opacity = "1";
+      el.style.transform = `translateY(calc(var(--row) * ${i}))`;
+    });
+    el.querySelector(".rank").textContent = i + 1;
+    el.querySelector(".bar").style.width = Math.max(0, (p.score || 0) / best * 100) + "%";
+    const score = el.querySelector(".score");
+    if (r.score !== null && p.score !== r.score) {
+      score.classList.add("flash");
+      requestAnimationFrame(() => requestAnimationFrame(() => score.classList.remove("flash")));
+    }
+    score.textContent = p.score === null ? "inf" : p.score.toLocaleString();
+    if (r.rank !== null && r.rank !== i) {
+      const move = el.querySelector(".move"), d = r.rank - i;
+      move.textContent = (d > 0 ? "▲" : "▼") + Math.abs(d);
+      move.className = "move show " + (d > 0 ? "up" : "down");
+      requestAnimationFrame(() => requestAnimationFrame(() => move.classList.remove("show")));
+    }
+    r.rank = i; r.score = p.score;
+  });
+  for (const [member, r] of rows) {
+    if (!seen.has(member)) {       // fell out of the top N: slide off the bottom
+      r.el.style.opacity = "0";
+      r.el.style.transform = `translateY(calc(var(--row) * ${TOP}))`;
+      r.rank = null;
+      setTimeout(() => { if (r.rank === null) { r.el.remove(); rows.delete(member); } }, 600);
+    }
+  }
+}
+
+async function poll() {
+  const t0 = performance.now();
+  try {
+    const res = await fetch(`api/board?n=${TOP}`, { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+    document.getElementById("rtt").textContent = Math.round(performance.now() - t0) + " ms";
+    document.getElementById("status").textContent = "";
+    render(data);
+  } catch (e) {
+    document.getElementById("status").textContent = "Can't reach the demo server: " + e.message;
+  } finally {
+    setTimeout(poll, POLL_MS);
+  }
+}
+
+async function bump(member) {
+  await fetch(`api/bump?member=${encodeURIComponent(member)}`, { method: "POST" });
+}
+
+document.getElementById("find").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const who = document.getElementById("who").value.trim();
+  const out = document.getElementById("found");
+  if (!who) return;
+  const res = await fetch(`api/rank?member=${encodeURIComponent(who)}`);
+  const d = await res.json();
+  out.textContent = !res.ok ? d.error
+    : d.rank === null ? `${d.member} is not on the board`
+    : `${d.member} is #${d.rank} with ${d.score === null ? "inf" : d.score.toLocaleString()} points (ZREVRANK, O(log n))`;
+});
+
+poll();
+</script>
+</body>
+</html>

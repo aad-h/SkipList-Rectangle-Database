@@ -25,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import skipdb.demo.LeaderboardDemo;
 
 /**
  * TCP server speaking RESP2 and RESP3, so redis-cli and Redis client libraries
@@ -45,12 +46,16 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code --appendfsync always|everysec|no} picks when it is fsynced (default
  * {@code everysec}), and {@code BGREWRITEAOF} compacts it in the background.
  *
+ * <p>{@code --demo} also starts the {@link LeaderboardDemo live
+ * leaderboard} web page (port 8080, or {@code --demo-port}).
+ *
  * <p>A cron thread runs Redis's active expiry ten times a second, deleting
  * keys whose TTL has passed even if no client touches them again.
  *
  * <pre>
  * java -cp target/classes skipdb.SkipDBServer [port] [--io threads|nio]
  *     [--aof appendonly.aof] [--appendfsync everysec]
+ *     [--demo] [--demo-port 8080]
  * redis-cli -p 6380 ZADD board 100 alice
  * </pre>
  */
@@ -719,9 +724,12 @@ public final class SkipDBServer implements AutoCloseable {
     }
 
 
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws IOException,
+        InterruptedException {
         int port = 6380;
         Path aofPath = null;
+        boolean demo = false;
+        int demoPort = LeaderboardDemo.DEFAULT_HTTP_PORT;
         Aof.Fsync fsync = Aof.Fsync.EVERYSEC;
         Io io = Io.THREADS;
         for (int i = 0; i < args.length; i++) {
@@ -734,6 +742,13 @@ public final class SkipDBServer implements AutoCloseable {
             else if (args[i].equals("--io") && i + 1 < args.length) {
                 io = Io.parse(args[++i]);
             }
+            else if (args[i].equals("--demo")) {
+                demo = true;
+            }
+            else if (args[i].equals("--demo-port") && i + 1 < args.length) {
+                demo = true;
+                demoPort = Integer.parseInt(args[++i]);
+            }
             else {
                 port = Integer.parseInt(args[i]);
             }
@@ -742,6 +757,16 @@ public final class SkipDBServer implements AutoCloseable {
         System.out.println("SkipDB listening on port " + srv.port() + " ("
             + io.name().toLowerCase(Locale.ROOT) + " I/O)"
             + "  (try: redis-cli -p " + srv.port() + " ping)");
-        srv.serve();
+        if (!demo) {
+            srv.serve();
+            return;
+        }
+        // the demo is a RESP client of this server, so serve first
+        srv.start();
+        LeaderboardDemo d = LeaderboardDemo.launch(
+            "localhost", srv.port(), demoPort);
+        System.out.println("Leaderboard demo on http://localhost:" + d.port()
+            + "/");
+        Thread.currentThread().join(); // server threads are daemons
     }
 }

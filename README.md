@@ -20,6 +20,26 @@ redis-cli -p 6380 SET session:42 alice EX 1800 NX   # expires in 30 min
 redis-cli -p 6380 TTL session:42                    # -> 1800
 ```
 
+**Live leaderboard demo:** `--demo` also starts a small web page at
+<http://localhost:8080/> (`--demo-port` to change it) showing the top 15 of
+the `demo:board` sorted set. A simulator seeds 24 players (`ZADD NX`, so an
+AOF-restored board keeps its scores) and adds points to a random one four
+times a second; the page polls twice a second and slides rows to their new
+rank, flashing changed scores and showing ▲/▼ moves. Click a player to
+`ZINCRBY` them +25, or look anyone up by name (`ZREVRANK`). The demo is a
+plain RESP client of the database (a small `RespClient`), served by the
+JDK's built-in `com.sun.net.httpserver` with no dependencies, so it also runs
+standalone against any Redis-compatible server:
+
+```bash
+java -cp target/classes skipdb.SkipDBServer --demo          # SkipDB + demo
+java -cp target/classes skipdb.demo.LeaderboardDemo --redis localhost:6379 \
+    --port 8080 [--key demo:board] [--no-sim]               # against real Redis
+```
+
+JSON endpoints: `GET /api/board?n=15` (`ZREVRANGE ... WITHSCORES` + `ZCARD`,
+with the round-trip time), `GET /api/rank?member=x`, `POST /api/bump?member=x`.
+
 **Expiry:** any key can carry a TTL (`EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`
 with Redis 7's `NX XX GT LT`, `TTL PTTL EXPIRETIME PEXPIRETIME PERSIST`, and
 `SET ... EX|PX|EXAT|PXAT|KEEPTTL` alongside `NX XX GET`). As in Redis, expired
@@ -204,7 +224,9 @@ RESP3 tests (encoder bytes for every type, `HELLO` validation, one connection
 in RESP3 beside one in RESP2, transactions). RESP3 replies were diffed
 byte-for-byte against Redis 7.0.15. Benchmark tests check that all three
 benchmarked structures return identical ranks and ranges, plus flag parsing,
-the time budget and the output formats. Also verified against real `redis-cli`,
+the time budget and the output formats. Demo tests drive the HTTP endpoints
+against a live server (ordering, rank lookup, bumps, 400/404/405/502 errors,
+JSON escaping) and the RESP client's reply decoding. Also verified against real `redis-cli`,
 `redis-benchmark` and `redis-py` 8 (default RESP3), in both I/O models.
 
 See [ROADMAP.md](ROADMAP.md) for persistence, expiry, benchmarks and the demo.
