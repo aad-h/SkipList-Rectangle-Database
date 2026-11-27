@@ -240,8 +240,9 @@ public final class LeaderboardDemo implements AutoCloseable {
     }
 
 
-    private void handle(HttpExchange ex) throws IOException {
-        try (HttpExchange e = ex) {
+    private void handle(HttpExchange e) throws IOException {
+        // HttpExchange is only AutoCloseable from JDK 21
+        try {
             String path = e.getRequestURI().getPath();
             String method = e.getRequestMethod();
             Map<String, String> q = parseQuery(e.getRequestURI()
@@ -280,6 +281,9 @@ public final class LeaderboardDemo implements AutoCloseable {
             catch (IOException down) {
                 json(e, 502, error("SkipDB: " + down.getMessage()));
             }
+        }
+        finally {
+            e.close();
         }
     }
 
