@@ -38,8 +38,8 @@ Target resume line:
 
 ## Phase 4: Showcase
 - [x] Live leaderboard demo (small web page fed by SkipDB)
-- [ ] Docker image, `docker run -p 6380:6380 skipdb`
-- [ ] Architecture diagram and a write-up of the design trade-offs
+- [x] Docker image, `docker run -p 6380:6380 skipdb`
+- [x] Architecture diagram and a write-up of the design trade-offs
 
 ---
 
@@ -57,4 +57,4 @@ README if user-visible. Tick the box in the same commit that finishes it.
 - [x] 7. Benchmark harness (`skipdb.bench`): RankedSkipList vs `TreeMap` vs `ConcurrentSkipListMap` for insert/rank/range at 10k–1M elements, warmup + repeated trials, CSV output, results table in README
 - [x] 8. Single-threaded NIO event-loop server (`--io nio`), Redis's model; compare against thread-per-client with `redis-benchmark` and document throughput/p99
 - [x] 9. Live leaderboard demo: tiny HTTP server (`com.sun.net.httpserver`) + one HTML page that polls SkipDB and animates rank changes; `--demo` flag
-- [ ] 10. Dockerfile, architecture diagram (Mermaid) in README, final results section and resume-ready summary
+- [x] 10. Dockerfile, architecture diagram (Mermaid) in README, final results section and resume-ready summary

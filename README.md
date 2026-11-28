@@ -20,6 +20,25 @@ redis-cli -p 6380 SET session:42 alice EX 1800 NX   # expires in 30 min
 redis-cli -p 6380 TTL session:42                    # -> 1800
 ```
 
+**Docker:** the image compiles with plain `javac` (no Maven), runs as a
+non-root user on a JRE base, uses the `nio` event loop and keeps an AOF in the
+`/data` volume by default, and health-checks itself with a RESP `PING`.
+`docker stop` sends SIGTERM, and a shutdown hook flushes and fsyncs the AOF
+before the JVM exits. CI builds the image, writes data, restarts the
+container and reads it back.
+
+```bash
+docker build -t skipdb .
+docker run -d --name skipdb -p 6380:6380 -v skipdb-data:/data skipdb
+redis-cli -p 6380 ZADD board 100 alice
+docker run --rm -p 6380:6380 -p 8080:8080 skipdb 6380 --io nio --demo   # + web demo, no AOF
+```
+
+Flags are parsed strictly (an unknown flag or bad port prints the usage and
+exits with status 2 instead of starting on the wrong settings):
+`[port] [--io threads|nio] [--aof <path>] [--appendfsync always|everysec|no]
+[--demo] [--demo-port <port>]`.
+
 **Live leaderboard demo:** `--demo` also starts a small web page at
 <http://localhost:8080/> (`--demo-port` to change it) showing the top 15 of
 the `demo:board` sorted set. A simulator seeds 24 players (`ZADD NX`, so an
@@ -104,11 +123,48 @@ r.zrangebyscore("board", 90, "+inf", withscores=True)  # [('carol', 92.0), ...]
 
 **How it works**
 
+```mermaid
+flowchart TB
+    clients["redis-cli / redis-py /<br/>redis-benchmark"]
+    browser["browser"]
+    subgraph server["SkipDBServer"]
+        io{{"I/O: thread per client<br/>or NIO event loop"}}
+        dec["Resp.Decoder<br/>(incremental, pipelined)"]
+        lock[["one command lock<br/>(Redis's single-threaded model)"]]
+        handler["CommandHandler"]
+        enc["Resp encoder<br/>(RESP2 or RESP3 per connection)"]
+        cron(["cron thread:<br/>active expiry + everysec fsync"])
+    end
+    subgraph keyspace["keyspace: HashMap&lt;String, Object&gt;"]
+        str["String values"]
+        zset["SortedSet"]
+        hash["HashMap member to score<br/>O(1) ZSCORE"]
+        rsl["RankedSkipList<br/>spans give O(log n) rank / select"]
+        exp["Expires<br/>key to deadline, O(1) sampling"]
+    end
+    aof[("appendonly.aof")]
+    demo["LeaderboardDemo<br/>(com.sun.net.httpserver)"]
+
+    clients -- "RESP over TCP :6380" --> io
+    io --> dec --> lock --> handler
+    handler --> enc --> io
+    handler --> str
+    handler --> zset
+    zset --> hash
+    zset --> rsl
+    handler --> exp
+    cron --> exp
+    handler -- "every write, before the reply" --> aof
+    aof -. "replay on startup,<br/>BGREWRITEAOF compaction" .-> handler
+    browser -- "HTTP :8080" --> demo
+    demo -- "RespClient" --> io
+```
+
 - `RankedSkipList`: every forward link stores its *span* (how many nodes it
   skips), so summing spans along the search path gives an element's rank.
   Insert, delete, rank, select-by-rank and score lookups are all expected
   O(log n). This is the same design Redis uses for `ZSET`.
-- `SortedSet`: hash map (member → score, O(1) `ZSCORE`) + ranked skip list.
+- `SortedSet`: hash map (member to score, O(1) `ZSCORE`) + ranked skip list.
 - `Resp`: RESP parser and RESP2/RESP3 encoder (doubles, maps, nulls,
   verbatim strings), including inline commands and pipelining.
 - `SkipDBServer`: TCP server with two I/O models (`--io threads|nio`).
@@ -207,6 +263,37 @@ java -Xmx2g -cp target/classes skipdb.bench.Bench \
     --sizes 10000,100000,1000000 --trials 5 --warmup 2 --queries 1000 --csv bench.csv
 ```
 
+**Results**
+
+| What | Number |
+|---|---|
+| Rank / select-by-rank at 1M members | ~2.6 us, vs ~100 ms for `TreeMap` / `ConcurrentSkipListMap` (~40,000× faster) |
+| Unpipelined `GET` / `SET` (`nio`, 50 clients) | 113k / 102k req/s, within ~6% of Redis 7 on the same box |
+| Event loop vs thread-per-client | 1.2–1.7× throughput, up to 5.6× lower p99 |
+| Pipelined `SET` (16 deep) | 623k req/s (Redis 7: 837k) |
+| Weakest spot | `ZADD`: 45–65% of Redis's throughput (per-member allocation vs Redis's compact C encodings) |
+| Compatibility | `redis-cli`, `redis-benchmark`, `redis-py` 8 (RESP3) in both I/O models; RESP3 replies byte-identical to Redis 7.0.15 |
+| Durability | AOF with `always`/`everysec`/`no`, crash-truncation recovery, background rewrite; survives `kill` and `docker stop` |
+| Tests | 167 JUnit tests: randomized model checks, differential decoder tests, socket tests on both I/O models, AOF crash cases |
+
+Server numbers come from one shared 2-vCPU container, so the ratios matter
+more than the absolute figures.
+
+**Resume summary**
+
+> **SkipDB**: Redis-compatible in-memory database in Java (no dependencies)
+> built on a span-augmented skip list, the structure behind Redis's `ZSET`.
+> - Implemented 46 Redis commands over RESP2/RESP3 so `redis-cli`,
+>   `redis-benchmark` and `redis-py` work unmodified; replies match Redis 7
+>   byte-for-byte.
+> - O(log n) rank queries ~40,000× faster than `TreeMap` at 1M elements;
+>   single-threaded NIO event loop serves 113k `GET`/s, within 6% of Redis on
+>   the same hardware and 1.2–1.7× thread-per-client.
+> - Append-only-file persistence with three fsync policies, crash recovery and
+>   background compaction; TTLs with Redis's lazy + sampled active expiry.
+> - Live leaderboard web demo; Docker image with health check; 167 tests
+>   including randomized model checking and crash-at-every-byte AOF tests.
+
 **Tests:** 20,000 random operations checked against a `TreeSet` model, RESP
 encoding edge cases (UTF-8 byte lengths, malformed input), command semantics,
 socket tests for pipelining, transactions, protocol errors and 8
@@ -226,10 +313,12 @@ byte-for-byte against Redis 7.0.15. Benchmark tests check that all three
 benchmarked structures return identical ranks and ranges, plus flag parsing,
 the time budget and the output formats. Demo tests drive the HTTP endpoints
 against a live server (ordering, rank lookup, bumps, 400/404/405/502 errors,
-JSON escaping) and the RESP client's reply decoding. Also verified against real `redis-cli`,
+JSON escaping) and the RESP client's reply decoding. Option tests check strict
+flag parsing and that the Dockerfile's default command parses and its
+`EXPOSE` and health-check ports match it. Also verified against real `redis-cli`,
 `redis-benchmark` and `redis-py` 8 (default RESP3), in both I/O models.
 
-See [ROADMAP.md](ROADMAP.md) for persistence, expiry, benchmarks and the demo.
+See [ROADMAP.md](ROADMAP.md) for how the project grew, item by item.
 
 ---
 
