@@ -12,3 +12,28 @@ jobs:
           cache: maven
       - run: mvn -B test
       - run: mvn -B -q package -DskipTests && java -jar target/skiplist-rectangles-1.0.0.jar examples/P1test1.txt
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t skipdb .
+      - name: Run, wait for healthy, write, restart, read back
+        run: |
+          resp() { exec 3<>/dev/tcp/127.0.0.1/6380; printf "$1" >&3; timeout 2 cat <&3 || true; exec 3<&-; }
+          healthy() {
+            for i in $(seq 60); do
+              [ "$(docker inspect -f '{{.State.Health.Status}}' skipdb)" = healthy ] && return 0
+              sleep 1
+            done
+            docker logs skipdb; return 1
+          }
+          docker run -d --name skipdb -p 6380:6380 -v skipdb-data:/data skipdb
+          healthy
+          resp 'ZADD board 100 alice 85 bob\r\nZREVRANK board bob\r\n' | tee out1
+          grep -q '^:1' out1
+          docker stop skipdb && docker start skipdb
+          healthy
+          resp 'ZSCORE board alice\r\nQUIT\r\n' | tee out2
+          grep -q '^100' out2
+          docker logs skipdb

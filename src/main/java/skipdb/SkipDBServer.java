@@ -724,47 +724,167 @@ public final class SkipDBServer implements AutoCloseable {
     }
 
 
+    /**
+     * Command-line options for {@link #main}. Parsing is strict: an unknown
+     * flag, a flag missing its value or an out-of-range port is an error
+     * rather than being silently read as the port, so a typo in a
+     * {@code docker run} command fails fast with a usage message.
+     */
+    public static final class Options {
+
+        /** Printed (to stderr) when the arguments do not parse. */
+        public static final String USAGE =
+            "usage: skipdb.SkipDBServer [port] [--io threads|nio]"
+                + " [--aof <path>] [--appendfsync always|everysec|no]"
+                + " [--demo] [--demo-port <port>]";
+
+        /** Default RESP port (Redis's 6379 + 1, so both can run side by side). */
+        public static final int DEFAULT_PORT = 6380;
+
+        /** RESP port; 0 picks a free one. */
+        public final int port;
+        /** Append-only file, or null when persistence is off. */
+        public final Path aof;
+        /** fsync policy for the append-only file. */
+        public final Aof.Fsync fsync;
+        /** I/O model. */
+        public final Io io;
+        /** Whether to start the leaderboard demo web page. */
+        public final boolean demo;
+        /** HTTP port of the demo page. */
+        public final int demoPort;
+
+        private Options(int port, Path aof, Aof.Fsync fsync, Io io,
+            boolean demo, int demoPort) {
+            this.port = port;
+            this.aof = aof;
+            this.fsync = fsync;
+            this.io = io;
+            this.demo = demo;
+            this.demoPort = demoPort;
+        }
+
+
+        /**
+         * Parses {@code main}'s arguments.
+         *
+         * @param args
+         *            the command line; flags may appear in any order
+         * @return the options, with defaults for anything not given
+         * @throws IllegalArgumentException
+         *             with a one-line reason if the arguments are invalid
+         */
+        public static Options parse(String... args) {
+            int port = DEFAULT_PORT;
+            boolean portSet = false;
+            Path aof = null;
+            Aof.Fsync fsync = Aof.Fsync.EVERYSEC;
+            Io io = Io.THREADS;
+            boolean demo = false;
+            int demoPort = LeaderboardDemo.DEFAULT_HTTP_PORT;
+            for (int i = 0; i < args.length; i++) {
+                String a = args[i];
+                switch (a) {
+                    case "--aof":
+                        aof = Paths.get(value(args, i++));
+                        break;
+                    case "--appendfsync":
+                        fsync = Aof.Fsync.parse(value(args, i++));
+                        break;
+                    case "--io":
+                        io = Io.parse(value(args, i++));
+                        break;
+                    case "--demo":
+                        demo = true;
+                        break;
+                    case "--demo-port":
+                        demo = true;
+                        demoPort = port(a, value(args, i++));
+                        break;
+                    default:
+                        if (a.startsWith("-")) {
+                            throw new IllegalArgumentException(
+                                "unknown option: " + a);
+                        }
+                        if (portSet) {
+                            throw new IllegalArgumentException(
+                                "unexpected argument: " + a);
+                        }
+                        port = port("port", a);
+                        portSet = true;
+                }
+            }
+            return new Options(port, aof, fsync, io, demo, demoPort);
+        }
+
+
+        private static String value(String[] args, int i) {
+            if (i + 1 >= args.length) {
+                throw new IllegalArgumentException(
+                    args[i] + " needs a value");
+            }
+            return args[i + 1];
+        }
+
+
+        private static int port(String what, String s) {
+            int p;
+            try {
+                p = Integer.parseInt(s);
+            }
+            catch (NumberFormatException e) {
+                p = -1;
+            }
+            if (p < 0 || p > 65535) {
+                throw new IllegalArgumentException(
+                    what + " must be a number from 0 to 65535, got: " + s);
+            }
+            return p;
+        }
+    }
+
+
+    /**
+     * Starts the server (and the demo if asked) and blocks. A shutdown hook
+     * closes the server on SIGTERM/SIGINT ({@code docker stop}, Ctrl-C), so
+     * the append-only file is flushed and fsynced before the JVM exits.
+     *
+     * @param args
+     *            see {@link Options#USAGE}
+     */
     public static void main(String[] args) throws IOException,
         InterruptedException {
-        int port = 6380;
-        Path aofPath = null;
-        boolean demo = false;
-        int demoPort = LeaderboardDemo.DEFAULT_HTTP_PORT;
-        Aof.Fsync fsync = Aof.Fsync.EVERYSEC;
-        Io io = Io.THREADS;
-        for (int i = 0; i < args.length; i++) {
-            if (args[i].equals("--aof") && i + 1 < args.length) {
-                aofPath = Paths.get(args[++i]);
-            }
-            else if (args[i].equals("--appendfsync") && i + 1 < args.length) {
-                fsync = Aof.Fsync.parse(args[++i]);
-            }
-            else if (args[i].equals("--io") && i + 1 < args.length) {
-                io = Io.parse(args[++i]);
-            }
-            else if (args[i].equals("--demo")) {
-                demo = true;
-            }
-            else if (args[i].equals("--demo-port") && i + 1 < args.length) {
-                demo = true;
-                demoPort = Integer.parseInt(args[++i]);
-            }
-            else {
-                port = Integer.parseInt(args[i]);
-            }
+        Options o;
+        try {
+            o = Options.parse(args);
         }
-        SkipDBServer srv = new SkipDBServer(port, aofPath, fsync, io);
+        catch (IllegalArgumentException e) {
+            System.err.println("skipdb: " + e.getMessage());
+            System.err.println(Options.USAGE);
+            System.exit(2);
+            return;
+        }
+        SkipDBServer srv = new SkipDBServer(o.port, o.aof, o.fsync, o.io);
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                srv.close();
+            }
+            catch (IOException e) {
+                System.err.println("skipdb: error closing: " + e);
+            }
+        }, "skipdb-shutdown"));
         System.out.println("SkipDB listening on port " + srv.port() + " ("
-            + io.name().toLowerCase(Locale.ROOT) + " I/O)"
+            + o.io.name().toLowerCase(Locale.ROOT) + " I/O"
+            + (o.aof == null ? "" : ", aof " + o.aof) + ")"
             + "  (try: redis-cli -p " + srv.port() + " ping)");
-        if (!demo) {
+        if (!o.demo) {
             srv.serve();
             return;
         }
         // the demo is a RESP client of this server, so serve first
         srv.start();
         LeaderboardDemo d = LeaderboardDemo.launch(
-            "localhost", srv.port(), demoPort);
+            "localhost", srv.port(), o.demoPort);
         System.out.println("Leaderboard demo on http://localhost:" + d.port()
             + "/");
         Thread.currentThread().join(); // server threads are daemons
